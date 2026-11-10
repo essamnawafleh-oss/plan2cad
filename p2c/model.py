@@ -124,7 +124,6 @@ class Project:
     fit_info: dict = field(default_factory=dict)
     chain_info: dict = field(default_factory=dict)
     chains: list = field(default_factory=list)
-    ai_info: dict = field(default_factory=dict)
 
     KINDS = {
         "walls": Wall, "columns": Column, "doors": Door, "windows": Window, "stairs": Stair,
