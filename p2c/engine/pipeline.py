@@ -57,6 +57,15 @@ def run(project, gray, params=None, progress=None):
     project.trace = [[tuple(map(float, q)) for q in pl] for pl in D.trace_lines(gray, p['threshold'], up=2)]
     say(0.58, 'angles')
     gray_full, gray = gray, clean
+    # colour CAD drawings: walls are found on a view without the coloured furniture / text
+    from . import imageio as _io
+    wv = p.get('wall_view')
+    if wv is None:
+        wv = _io.load_wall_view(getattr(project, 'image_path', None), gray_full.shape)
+    if wv is not None and wv.shape == gray_full.shape:
+        wv = wv.copy(); wv[(clean == 255) & (gray_full != 255)] = 255          # text / dimension clutter removed
+        gray = wv
+    nn_img = gray if wv is not None else gray_full
     if p['do_walls']:
         say(0.55, 'walls')
         nn_prob = None
@@ -64,11 +73,11 @@ def run(project, gray, params=None, progress=None):
             from . import neural as NN
             if NN.available():
                 say(0.56, 'nn')
-                nn_prob = NN.segment(gray_full, s, progress=lambda f: say(0.56 + 0.06 * f, 'nn'))
+                nn_prob = NN.segment(nn_img, s, progress=lambda f: say(0.56 + 0.06 * f, 'nn'))
         project._nn_prob = nn_prob
         solid, core = D.detect_solid_walls(gray, s, project.angles, p) if p.get('do_solid', True) else ([], None)
         if nn_prob is not None:
-            nn_walls = NN.walls_from_prob(nn_prob, gray_full, s, project.angles, p)
+            nn_walls = NN.walls_from_prob(nn_prob, nn_img, s, project.angles, p)
             # the network decides where walls are; rule walls only add what it clearly missed
             from ..geometry import wall_polygon as _wp
             from shapely.ops import unary_union as _uu
@@ -98,13 +107,19 @@ def run(project, gray, params=None, progress=None):
                 return False
             vert = abs(x1 - x0) < 0.03 * L; hor = abs(y1 - y0) < 0.03 * L
             return (vert and (max(x0, x1) < m2 or min(x0, x1) > W - m2)) or (hor and (max(y0, y1) < m2 or min(y0, y1) > H - m2))
-        walls = [w for w in walls if not _edge_line(w)]
+        def _attached(w):            # a real outer wall has other walls meeting it; a page frame line does not
+            from shapely.geometry import LineString as _LS
+            ln = _LS(w.pts); tol = 0.35 / s
+            return sum(1 for o in walls if o is not w and ln.distance(_LS(o.pts)) < tol) >= 2
+        walls = [w for w in walls if not (_edge_line(w) and not _attached(w))]
         project.walls = D.keep_building(D.join_walls(walls, s, p['wall_join'] + 0.15), s)
         if p.get('complete_from_dims', True) and project.dims:
             from .complete import complete_walls
             say(0.66, 'complete')
             project.completed = complete_walls(project, gray_full, p)
             project.walls = D.join_walls(project.walls, s, p['wall_join'] + 0.15)
+        if nn_prob is not None:
+            NN.trim_overshoots(project.walls, s)
         _apply_wall_labels(project)
     if p['do_columns']:
         say(0.68, 'columns')

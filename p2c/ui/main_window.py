@@ -299,6 +299,10 @@ class MainWindow(QMainWindow):
 
     def load_image(self, path, ask=True, opts=None):
         gray = imageio.imread_gray(path)
+        try:
+            wv = imageio.wall_view(imageio.imread_color(path))
+        except Exception:
+            wv = None
         if ask:
             dlg = ImportDialog(self.project.scale, self)
             if dlg.exec() != ImportDialog.DialogCode.Accepted:
@@ -307,14 +311,23 @@ class MainWindow(QMainWindow):
         opts = opts or dict(rotate=0, deskew=True, clean=True, scale=self.project.scale)
         if opts['rotate']:
             gray = imageio.rotate_bound(gray, -opts['rotate'])  # clockwise
+            if wv is not None:
+                wv = imageio.rotate_bound(wv, -opts['rotate'])
         if opts['deskew']:
             sk = imageio.estimate_skew(gray)
             if sk:
                 gray = imageio.rotate_bound(gray, sk)
+                if wv is not None:
+                    wv = imageio.rotate_bound(wv, sk)
         if opts['clean']:
             gray = imageio.clean_background(gray)
         work = os.path.join(tempfile.gettempdir(), f"plan2cad_work_{os.getpid()}.png")
         imageio.imwrite(work, gray)
+        wpath = imageio.wall_view_path(work)
+        if wv is not None and wv.shape == gray.shape:
+            imageio.imwrite(wpath, wv)
+        elif os.path.exists(wpath):
+            os.remove(wpath)
         self.work_image = work
         self.project = Project(image_path=work, scale=opts['scale'])
         self.project_path = None

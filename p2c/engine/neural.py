@@ -75,14 +75,14 @@ def walls_from_prob(prob, gray, scale, angles, params):
     here (they are cut out again when the drawing is built)."""
     wall = ((prob[1] > 0.5) | (prob[3] > 0.5)).astype(np.uint8)
     wall = cv2.morphologyEx(wall, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    H, W = wall.shape; m = int(0.02 * max(H, W))
-    wall[:m] = 0; wall[-m:] = 0; wall[:, :m] = 0; wall[:, -m:] = 0          # page frame
+    H, W = wall.shape; m = max(3, int(0.008 * max(H, W)))
+    wall[:m] = 0; wall[-m:] = 0; wall[:, :m] = 0; wall[:, -m:] = 0          # page edge
     n, lab, st, _ = cv2.connectedComponentsWithStats(wall, 8)
-    for i in range(1, n):                                                  # long frame-like strokes near the edge
+    for i in range(1, n):                     # isolated frame strokes (a lone long thin line along the edge)
         x, y, w, h, a = st[i]
-        if (w > 0.6 * W and (y < 3 * m or y + h > H - 3 * m)) or (h > 0.6 * H and (x < 3 * m or x + w > W - 3 * m)):
-            if a < 0.25 * w * h:
-                wall[lab == i] = 0
+        if (w > 0.6 * W and h < 0.03 * H and (y < 0.06 * H or y + h > 0.94 * H)) or \
+           (h > 0.6 * H and w < 0.03 * W and (x < 0.06 * W or x + w > 0.94 * W)):
+            wall[lab == i] = 0
     return mask_walls(wall, scale, angles, params)
 
 
@@ -260,3 +260,51 @@ def orient_doors(doors, gray, scale):
         d.p0, d.p1, d.side = tuple(map(float, h)), tuple(map(float, o)), int(sd)
         out.append(d)
     return out
+
+
+def trim_overshoots(walls, scale):
+    """Clean corners: a wall end that pokes past a crossing wall (the '+' stubs) or stops just short of it
+    is moved to that wall's outer face, so L-corners close neatly and T-junctions meet flush."""
+    segs = [(np.array(w.pts[0], float), np.array(w.pts[-1], float)) for w in walls]
+    new = []
+    for i, w in enumerate(walls):
+        a, b = segs[i]
+        L = np.linalg.norm(b - a)
+        if L < 1:
+            new.append((a, b)); continue
+        u = (b - a) / L
+        ti = w.t / scale
+        pos = [0.0, L]
+        for end in (0, 1):
+            best = None
+            for j, (c, d) in enumerate(segs):
+                if j == i:
+                    continue
+                v = d - c; Lv = np.linalg.norm(v)
+                if Lv < 1:
+                    continue
+                sinang = abs(u[0] * v[1] - u[1] * v[0]) / Lv
+                if sinang < 0.5:
+                    continue
+                tt, ss = np.linalg.solve(np.array([u, -v]).T, c - a)
+                ext = ti / 2 + 0.15 / scale
+                if not (-ext <= ss * Lv <= Lv + ext):
+                    continue
+                if (tt > 0.5 * L) != (end == 1):
+                    continue
+                tj = walls[j].t / scale
+                face = tj / 2 / sinang
+                off = max(0.0, face - ti / 2)          # walls are drawn with square caps of t/2
+                target = tt + off if end == 1 else tt - off
+                dist = abs(pos[end] - target)
+                if dist < 1.6 * tj + 0.12 / scale and (best is None or dist < best[0]):
+                    best = (dist, target)
+            if best:
+                pos[end] = best[1]
+        if pos[1] - pos[0] > 0.3 / scale:
+            new.append((a + u * pos[0], a + u * pos[1]))
+        else:
+            new.append((a, b))
+    for w, (a, b) in zip(walls, new):
+        w.pts = [tuple(map(float, a)), tuple(map(float, b))]
+    return walls

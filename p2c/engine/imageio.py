@@ -67,3 +67,54 @@ def clean_background(gray):
         if touches and area > 0.002 * w * h and (bw > 0.3*w or bh > 0.3*h):
             norm[lab == i] = 255
     return norm
+
+
+def imread_color(path):
+    data = np.fromfile(path, dtype=np.uint8)
+    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    if img is None:
+        raise IOError(f"Cannot read image: {path}")
+    return img
+
+
+def wall_view(bgr):
+    """Colour drawings (CAD exports): furniture/text are often coloured and walls neutral gray, sometimes
+    only lightly filled.  Returns a gray image with coloured ink removed and the neutral ink darkened,
+    or None when the drawing is not a colour drawing (plain scans are left alone)."""
+    if bgr is None or bgr.ndim != 3:
+        return None
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    g = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+    sat, val = hsv[..., 1], hsv[..., 2]
+    ink = val < 235
+    if ink.sum() < 500:
+        return None
+    coloured = ink & (sat > 50)
+    if coloured.sum() < 0.12 * ink.sum():
+        return None
+    neutral = ink & (sat <= 35)
+    out = np.full_like(g, 255)
+    v = g[neutral].astype(np.float32)
+    lo = float(np.percentile(v, 2)) if v.size else 0.0
+    hi = 238.0
+    out[neutral] = np.clip((v - lo) / max(hi - lo, 1) * 255, 0, 255).astype(np.uint8)
+    return out
+
+
+def wall_view_path(work_path):
+    import os
+    return os.path.splitext(work_path)[0] + '_walls.png'
+
+
+def load_wall_view(work_path, shape):
+    import os
+    if not work_path:
+        return None
+    p = wall_view_path(work_path)
+    if not os.path.exists(p):
+        return None
+    try:
+        w = imread_gray(p)
+    except Exception:
+        return None
+    return w if w.shape == tuple(shape) else None
