@@ -129,6 +129,7 @@ class MainWindow(QMainWindow):
         self.a_clear = self._act('clear_layer', None, self.clear_layer)
         self.a_fit_dims = self._act('fit_dims', 'calib', self.fit_dims, 'Ctrl+M')
         self.a_dim_rep = self._act('dim_report', None, self.dim_report)
+        self.a_compare = self._act('compare', None, self.compare_images)
         self.tool_group = QActionGroup(self); self.tool_group.setExclusive(True)
         self.tool_actions = {}
         for key, ic, sc in TOOLS:
@@ -218,7 +219,7 @@ class MainWindow(QMainWindow):
         for key, _, _ in TOOLS:
             m.addAction(self.tool_actions[key])
         m = mb.addMenu(tr('view'))
-        m.addAction(self.a_fit)
+        m.addAction(self.a_fit); m.addAction(self.a_compare)
         for d in (self.d_lib, self.d_layers, self.d_props):
             m.addAction(d.toggleViewAction())
         m = mb.addMenu(tr('help'))
@@ -298,29 +299,24 @@ class MainWindow(QMainWindow):
         self.load_image(path)
 
     def load_image(self, path, ask=True, opts=None):
-        gray = imageio.imread_gray(path)
-        try:
-            wv = imageio.wall_view(imageio.imread_color(path))
-        except Exception:
-            wv = None
+        from ..engine import workflow
         if ask:
             dlg = ImportDialog(self.project.scale, self)
             if dlg.exec() != ImportDialog.DialogCode.Accepted:
                 return
             opts = dlg.values()
         opts = opts or dict(rotate=0, deskew=True, clean=True, scale=self.project.scale)
-        if opts['rotate']:
-            gray = imageio.rotate_bound(gray, -opts['rotate'])  # clockwise
-            if wv is not None:
-                wv = imageio.rotate_bound(wv, -opts['rotate'])
-        if opts['deskew']:
-            sk = imageio.estimate_skew(gray)
-            if sk:
-                gray = imageio.rotate_bound(gray, sk)
-                if wv is not None:
-                    wv = imageio.rotate_bound(wv, sk)
-        if opts['clean']:
-            gray = imageio.clean_background(gray)
+        io = workflow.ImportOptions(rotate=int(opts.get('rotate', 0)), deskew=bool(opts.get('deskew', True)),
+                                    clean=bool(opts.get('clean', True)),
+                                    perspective=opts.get('perspective', 'auto'),
+                                    auto_orient=bool(opts.get('auto_orient', False)),
+                                    denoise=opts.get('denoise', 'auto'))
+        try:
+            r = workflow.import_image(path, io)
+        except Exception as e:
+            QMessageBox.critical(self, 'Plan2CAD', f"{tr('open_image')}: {e}")
+            return
+        gray, wv = r.gray, r.wall_view
         work = os.path.join(tempfile.gettempdir(), f"plan2cad_work_{os.getpid()}.png")
         imageio.imwrite(work, gray)
         wpath = imageio.wall_view_path(work)
@@ -329,7 +325,12 @@ class MainWindow(QMainWindow):
         elif os.path.exists(wpath):
             os.remove(wpath)
         self.work_image = work
-        self.project = Project(image_path=work, scale=opts['scale'])
+        self._import = r                                   # kept for the original/processed comparison
+        known = bool(opts.get('scale_known', False))
+        self.project = Project(image_path=work, scale=opts['scale'], scale_calibrated=known)
+        self.project.transform = r.transform
+        if known:
+            self.project.scale_source = 'user'
         self.project_path = None
         self.view.project = self.project
         self.props.view = self.view
@@ -339,6 +340,13 @@ class MainWindow(QMainWindow):
         self._update_scale_lbl(); self._model_changed()
         self.view.set_tool('select')
         self.hint.setText(tr('h_calib'))
+
+    def compare_images(self):
+        r = getattr(self, '_import', None)
+        if r is None:
+            return
+        from .dialogs import CompareDialog
+        CompareDialog(r.original, r.processed_color, r.transform.get('steps', []), self).exec()
 
     def open_project(self):
         if not self._confirm_discard():

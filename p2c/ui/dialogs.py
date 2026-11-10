@@ -30,7 +30,7 @@ class ImportDialog(QDialog):
     def __init__(self, scale, parent=None):
         super().__init__(parent)
         self.setWindowTitle(tr('import_title'))
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(480)
         lay = QVBoxLayout(self); lay.setContentsMargins(SP['xl'], SP['xl'], SP['xl'], SP['xl']); lay.setSpacing(SP['l'])
         lay.addWidget(_title(tr('import_title')))
         form = QFormLayout(); form.setSpacing(SP['m'])
@@ -38,11 +38,20 @@ class ImportDialog(QDialog):
         for a in (0, 90, 180, 270):
             self.rot.addItem(f"{a}°", a)
         form.addRow(tr('rotate'), self.rot)
+        self.persp = QComboBox()
+        self.persp.addItem(tr('persp_auto'), 'auto'); self.persp.addItem(tr('persp_off'), 'off')
+        form.addRow(tr('perspective'), self.persp)
+        self.orient = QCheckBox(tr('auto_orient')); self.orient.setChecked(False)
         self.deskew = QCheckBox(tr('deskew')); self.deskew.setChecked(True)
         self.clean = QCheckBox(tr('clean_bg')); self.clean.setChecked(True)
-        form.addRow('', self.deskew); form.addRow('', self.clean)
+        self.denoise = QCheckBox(tr('denoise_auto')); self.denoise.setChecked(True)
+        for c in (self.orient, self.deskew, self.clean, self.denoise):
+            form.addRow('', c)
+        self.known = QCheckBox(tr('scale_known')); self.known.setChecked(False)
         self.scale = QDoubleSpinBox(); self.scale.setDecimals(5); self.scale.setRange(0.00001, 10); self.scale.setValue(scale)
-        self.scale.setSingleStep(0.001)
+        self.scale.setSingleStep(0.001); self.scale.setEnabled(False)
+        self.known.toggled.connect(self.scale.setEnabled)
+        form.addRow('', self.known)
         form.addRow(tr('scale_m_px'), self.scale)
         lay.addLayout(form)
         note = QLabel(tr('scale_note')); note.setObjectName('hint'); note.setWordWrap(True)
@@ -51,7 +60,48 @@ class ImportDialog(QDialog):
 
     def values(self):
         return dict(rotate=self.rot.currentData(), deskew=self.deskew.isChecked(), clean=self.clean.isChecked(),
-                    scale=self.scale.value())
+                    perspective=self.persp.currentData(), auto_orient=self.orient.isChecked(),
+                    denoise='auto' if self.denoise.isChecked() else 'off',
+                    scale=self.scale.value(), scale_known=self.known.isChecked())
+
+
+class CompareDialog(QDialog):
+    """Original input next to the processed working image, with the list of processing steps."""
+
+    def __init__(self, original, processed, steps, parent=None):
+        super().__init__(parent)
+        from PySide6.QtGui import QImage, QPixmap
+        import cv2
+        self.setWindowTitle(tr('compare_title')); self.resize(1100, 700)
+        lay = QVBoxLayout(self); lay.setContentsMargins(SP['l'], SP['l'], SP['l'], SP['l'])
+        row = QHBoxLayout(); lay.addLayout(row, 1)
+
+        def pix(img):
+            if img is None:
+                return QPixmap()
+            if img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+            f = 1000.0 / max(img.shape[:2])
+            if f < 1:
+                img = cv2.resize(img, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+            rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).copy()
+            qi = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888)
+            return QPixmap.fromImage(qi.copy())
+        for title, img in ((tr('original'), original), (tr('processed'), processed)):
+            col = QVBoxLayout(); cap = QLabel(title); cap.setObjectName('section'); col.addWidget(cap)
+            lab = QLabel(); lab.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lab.setPixmap(pix(img).scaled(520, 600, Qt.AspectRatioMode.KeepAspectRatio,
+                                          Qt.TransformationMode.SmoothTransformation))
+            col.addWidget(lab, 1); row.addLayout(col, 1)
+        lines = []
+        for st in steps:
+            mark = '✔' if st.get('applied') else '–'
+            lines.append(f"{mark} {st.get('step')}: {st.get('reason', '')}")
+        info = QLabel(tr('pp_steps') + '\n' + '\n'.join(lines)); info.setObjectName('hint'); info.setWordWrap(True)
+        info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        lay.addWidget(info)
+        box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close); box.rejected.connect(self.reject)
+        lay.addWidget(box)
 
 
 class DetectDialog(QDialog):

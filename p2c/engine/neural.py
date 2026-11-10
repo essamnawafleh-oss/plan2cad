@@ -41,13 +41,27 @@ def _session():
     return _SESS
 
 
-def segment(gray, scale, wall_t=0.18, tile=768, pad=64, progress=None):
-    """Class probability maps (4, H, W) at the original resolution: bg, wall, door, window."""
+# safety limits for the network input (the resize factor follows the scale, which may be wrong)
+F_MIN, F_MAX = 0.12, 3.0
+MAX_SIDE = 6000              # longest side of the resized image fed to the network (px)
+
+
+def input_factor(scale, shape, wall_t=0.18):
+    """Resize factor so a wall of `wall_t` m becomes TGT_T px, clamped so a wrong scale can neither
+    blow the image up to gigabytes nor shrink it to nothing."""
+    f = TGT_T / (wall_t / max(float(scale), 1e-6))
+    f = min(max(f, F_MIN), F_MAX)
+    return min(f, MAX_SIDE / max(shape[:2]))
+
+
+def segment(gray, scale, wall_t=0.18, tile=768, pad=64, progress=None, factor=None):
+    """Class probability maps (4, H, W) float16 at the original resolution: bg, wall, door, window."""
     sess = _session()
-    f = TGT_T / (wall_t / scale)
+    f = factor if factor is not None else input_factor(scale, gray.shape, wall_t)
     H0, W0 = gray.shape
     img = cv2.resize(gray, None, fx=f, fy=f, interpolation=cv2.INTER_AREA if f < 1 else cv2.INTER_LINEAR)
     x = 1.0 - img.astype(np.float32) / 255.0
+    del img
     H, W = x.shape
     out = np.zeros((4, H, W), np.float32)
     cnt = np.zeros((H, W), np.float32)
@@ -67,7 +81,11 @@ def segment(gray, scale, wall_t=0.18, tile=768, pad=64, progress=None):
             if progress:
                 progress(k / n)
     out /= np.maximum(cnt, 1)
-    return np.stack([cv2.resize(out[i], (W0, H0), interpolation=cv2.INTER_LINEAR) for i in range(4)])
+    del cnt, x
+    res = np.empty((4, H0, W0), np.float16)
+    for i in range(4):
+        res[i] = cv2.resize(out[i], (W0, H0), interpolation=cv2.INTER_LINEAR)
+    return res
 
 
 def walls_from_prob(prob, gray, scale, angles, params):
@@ -325,15 +343,46 @@ def _door_scale(prob_door, door_w=0.82):
     return door_w / float(np.median(Ls)), len(Ls)
 
 
-def estimate_scale(gray, progress=None):
+def _ink_crops(gray, side_px, k=4):
+    """Up to k square crops (in original px) of the most ink-dense parts of the drawing."""
+    H, W = gray.shape
+    if max(H, W) <= side_px:
+        return [gray]
+    side = int(min(side_px, H, W))
+    ink = (gray < 180).astype(np.float32)
+    small = cv2.resize(ink, (max(1, W // 16), max(1, H // 16)), interpolation=cv2.INTER_AREA)
+    win = max(1, side // 16)
+    dens = cv2.blur(small, (win, win))
+    crops, taken = [], np.zeros_like(dens, bool)
+    for _ in range(k):
+        d = np.where(taken, -1, dens)
+        yy, xx = np.unravel_index(int(np.argmax(d)), d.shape)
+        if d[yy, xx] <= 0:
+            break
+        cy, cx = yy * 16, xx * 16
+        y0 = int(np.clip(cy - side // 2, 0, H - side)); x0 = int(np.clip(cx - side // 2, 0, W - side))
+        crops.append(gray[y0:y0 + side, x0:x0 + side])
+        taken[max(0, yy - win):yy + win + 1, max(0, xx - win):xx + win + 1] = True
+    return crops
+
+
+def estimate_scale(gray, progress=None, max_input=2048):
     """Scale (m/px) of a drawing without dimensions: the network is run at several trial scales and the
-    one at which the doors it finds are a normal door width (self-consistent) is kept."""
+    one at which the doors it finds are a normal door width (self-consistent) is kept.  Each trial looks
+    at no more than ~4 crops of max_input network pixels, so the cost stays bounded on big images."""
     grid = [0.006, 0.0085, 0.012, 0.017, 0.024, 0.034, 0.045]
     res = []
     for k, s in enumerate(grid):
-        p = segment(gray, s)
-        imp, n = _door_scale(p[2])
-        res.append((s, imp, n))
+        f = input_factor(s, gray.shape)
+        Ls_all, n_all = [], 0
+        for crop in _ink_crops(gray, int(max_input / f)):
+            p = segment(crop, s, factor=f)
+            imp, n = _door_scale(p[2].astype(np.float32))
+            if imp:
+                Ls_all += [imp] * n
+            n_all += n
+        imp = float(np.median(Ls_all)) if len(Ls_all) >= 3 else None
+        res.append((s, imp, n_all))
         if progress:
             progress((k + 1) / len(grid))
     best = None

@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import json
 import math
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, fields
 from typing import List, Tuple
 
 Pt = Tuple[float, float]
@@ -25,6 +25,8 @@ LAYERS = [
 class Wall:
     pts: List[Pt]
     t: float = 0.20            # thickness (m)
+    conf: float = 1.0          # detection confidence 0..1 (1 = drawn / confirmed by the user)
+    origin: str = ''           # '' manual | 'auto' detected | 'fixed' auto-corrected | 'uncertain'
 
 
 @dataclass
@@ -33,6 +35,8 @@ class Column:
     y: float
     s: float = 0.35            # size (m)
     a: float = 0.0             # rotation (deg, image space)
+    conf: float = 1.0
+    origin: str = ''
 
 
 @dataclass
@@ -41,6 +45,8 @@ class Door:
     p1: Pt                     # other jamb
     side: int = 1              # +1 / -1 : swing to the left/right of p0->p1
     double: bool = False
+    conf: float = 1.0
+    origin: str = ''
 
 
 @dataclass
@@ -48,6 +54,8 @@ class Window:
     p0: Pt
     p1: Pt
     t: float = 0.25            # depth (m), normally = wall thickness
+    conf: float = 1.0
+    origin: str = ''
 
 
 @dataclass
@@ -98,6 +106,9 @@ class Dim:
     p1: Pt
     text: str
     value: float
+    conf: float = 1.0          # OCR confidence
+    unit: str = 'm'            # unit the text was written in (value is always metres)
+    status: str = ''           # '' | 'used' | 'rejected:<reason>'
 
 
 @dataclass
@@ -124,6 +135,9 @@ class Project:
     fit_info: dict = field(default_factory=dict)
     chain_info: dict = field(default_factory=dict)
     chains: list = field(default_factory=list)
+    validation: list = field(default_factory=list)   # last validation report (list of dict)
+    corrections: list = field(default_factory=list)  # log of automatic corrections (list of dict)
+    transform: dict = field(default_factory=dict)    # import transform: original image -> working image
 
     KINDS = {
         "walls": Wall, "columns": Column, "doors": Door, "windows": Window, "stairs": Stair,
@@ -142,9 +156,12 @@ class Project:
         d = {"image_path": self.image_path, "scale": self.scale,
              "scale_calibrated": self.scale_calibrated, "angles": list(self.angles),
              "dims_info": dict(self.dims_info), "scale_source": self.scale_source,
-             "texts_raw": [[t, [list(q) for q in b]] for t, b in self.texts_raw]}
+             "texts_raw": [[t, [list(q) for q in b]] for t, b in self.texts_raw],
+             "completed": int(self.completed), "fit_info": _jsonable(self.fit_info),
+             "chain_info": _jsonable(self.chain_info), "validation": _jsonable(self.validation),
+             "corrections": _jsonable(self.corrections), "transform": _jsonable(self.transform)}
         for k in self.KINDS:
-            d[k] = [asdict(o) for o in getattr(self, k)]
+            d[k] = [_slim(asdict(o)) for o in getattr(self, k)]
         if with_trace:
             d["trace"] = [[list(p) for p in pl] for pl in self.trace]
         return d
@@ -159,10 +176,17 @@ class Project:
         p.dims_info = dict(d.get("dims_info", {}))
         p.scale_source = d.get("scale_source", "")
         p.texts_raw = [(t, [tuple(q) for q in b]) for t, b in d.get("texts_raw", [])]
+        p.completed = int(d.get("completed", 0) or 0)
+        p.fit_info = dict(d.get("fit_info", {}) or {})
+        p.chain_info = dict(d.get("chain_info", {}) or {})
+        p.validation = list(d.get("validation", []) or [])
+        p.corrections = list(d.get("corrections", []) or [])
+        p.transform = dict(d.get("transform", {}) or {})
         for k, C in cls.KINDS.items():
             items = []
+            known = {f.name for f in fields(C)}
             for o in d.get(k, []):
-                o = dict(o)
+                o = {key: val for key, val in dict(o).items() if key in known}   # newer files: ignore unknown keys
                 for key, val in list(o.items()):
                     if isinstance(val, list) and key in ("pts",):
                         o[key] = [tuple(v) for v in val]
@@ -197,6 +221,32 @@ class Project:
         for k in self.KINDS:
             setattr(self, k, [])
         self.trace = []
+
+
+_DEFAULTS = {"conf": 1.0, "origin": "", "unit": "m", "status": ""}
+
+
+def _slim(d: dict) -> dict:
+    """Leave out new optional fields that still have their default value, so files stay readable by
+    older versions of the program whenever nothing new is used."""
+    return {k: v for k, v in d.items() if not (k in _DEFAULTS and v == _DEFAULTS[k])}
+
+
+def _jsonable(o):
+    import numpy as _np
+    if isinstance(o, dict):
+        return {str(k): _jsonable(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [_jsonable(v) for v in o]
+    if isinstance(o, (_np.floating,)):
+        return float(o)
+    if isinstance(o, (_np.integer,)):
+        return int(o)
+    if isinstance(o, _np.ndarray):
+        return o.tolist()
+    if isinstance(o, (_np.bool_,)):
+        return bool(o)
+    return o
 
 
 def dist(a: Pt, b: Pt) -> float:

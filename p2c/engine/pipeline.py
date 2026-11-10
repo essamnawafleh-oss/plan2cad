@@ -190,6 +190,7 @@ def run(project, gray, params=None, progress=None):
             sp = c.s / s
             cv2.circle(mask, (int(c.x), int(c.y)), int(sp * 0.8), 255, -1)
         project.furniture = D.detect_furniture(gray, s, mask, p)
+    project._nn_prob = None; project._nn_windows = None        # free the probability maps (hundreds of MB)
     say(1.0, 'done')
     return project
 

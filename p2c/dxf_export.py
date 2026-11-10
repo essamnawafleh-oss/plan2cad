@@ -19,10 +19,30 @@ LAYER_STYLE = {  # name: (aci color, lineweight 1/100 mm, plot)
 }
 
 
+def _max_y(project):
+    """Image height to flip y when no image size is given: the lowest point of the geometry."""
+    ys = [0.0]
+    for w in project.walls:
+        ys += [p[1] for p in w.pts]
+    for o in list(project.doors) + list(project.windows):
+        ys += [o.p0[1], o.p1[1]]
+    for c in project.columns:
+        ys.append(c.y)
+    for f in project.furniture:
+        ys.append(f.y)
+    for p in project.polys:
+        ys += [q[1] for q in p.pts]
+    for t in list(project.texts) + list(project.levels):
+        ys.append(t.y)
+    for d in project.dims:
+        ys += [d.p0[1], d.p1[1]]
+    return max(ys)
+
+
 def export_dxf(project, path, image_size=None, working_image_file=None,
                include_scan=True, include_trace=True):
     s = project.scale
-    H = image_size[1] if image_size else 0
+    H = image_size[1] if image_size else _max_y(project)
     T = lambda x, y: (round(float(x) * s, 4), round((H - float(y)) * s, 4))
 
     doc = ezdxf.new('R2010', setup=True)
