@@ -59,14 +59,35 @@ def run(project, gray, params=None, progress=None):
     gray_full, gray = gray, clean
     if p['do_walls']:
         say(0.55, 'walls')
+        nn_prob = None
+        if p.get('use_nn', True):
+            from . import neural as NN
+            if NN.available():
+                say(0.56, 'nn')
+                nn_prob = NN.segment(gray_full, s, progress=lambda f: say(0.56 + 0.06 * f, 'nn'))
+        project._nn_prob = nn_prob
         solid, core = D.detect_solid_walls(gray, s, project.angles, p) if p.get('do_solid', True) else ([], None)
-        lined = D.detect_walls_combined(polys, gray, s, project.angles, p)
+        if nn_prob is not None:
+            nn_walls = NN.walls_from_prob(nn_prob, gray_full, s, project.angles, p)
+            # the network decides where walls are; rule walls only add what it clearly missed
+            from ..geometry import wall_polygon as _wp
+            from shapely.ops import unary_union as _uu
+            NU = _uu([_wp(w, s) for w in nn_walls]).buffer(2) if nn_walls else None
+            extra = solid if p.get('nn_keep_rules', True) else []
+            if NU is not None:
+                extra = [w for w in extra if _wp(w, s).difference(NU).area > 0.6 * _wp(w, s).area]
+            solid, lined = nn_walls + extra, []
+        else:
+            lined = D.detect_walls_combined(polys, gray, s, project.angles, p)
         if solid:
             from ..geometry import wall_polygon
             from shapely.ops import unary_union as _uu
             SU = _uu([wall_polygon(w, s) for w in solid]).buffer(2)
             lined = [w for w in lined if wall_polygon(w, s).intersection(SU).area < 0.5 * wall_polygon(w, s).area]
-        walls = D.prune_isolated_walls(solid + lined, s)
+        walls = solid + lined
+        if nn_prob is not None:
+            walls = D.join_walls(walls, s, p['wall_join'] + 0.15)       # close junction gaps before judging connectivity
+        walls = D.prune_isolated_walls(walls, s)
         H, W = gray.shape[:2]; m = max(12, 0.012 * max(H, W))
         walls = [w for w in walls if not all(x < m or y < m or x > W - m or y > H - m for x, y in w.pts)]   # page border
         m2 = 0.05 * min(H, W)
@@ -100,9 +121,20 @@ def run(project, gray, params=None, progress=None):
     if p['do_doors'] and project.walls:
         say(0.74, 'doors')
         project.doors = D.detect_doors(project.walls, gray, s, p)
+        if getattr(project, '_nn_prob', None) is not None:
+            from . import neural as NN
+            nd, nw = NN.openings_from_prob(project._nn_prob, project.walls, s)
+            nd = NN.orient_doors(nd, gray_full, s)
+            keep = [d for d in project.doors if all(math.dist(((d.p0[0]+d.p1[0])/2, (d.p0[1]+d.p1[1])/2),
+                    ((e.p0[0]+e.p1[0])/2, (e.p0[1]+e.p1[1])/2)) > 0.4 / s for e in nd)]
+            project.doors = nd + keep
+            project._nn_windows = nw
     if p['do_windows'] and project.walls:
         say(0.82, 'windows')
         project.windows = D.detect_windows(project.walls, project.columns, gray, s, p)
+        nw = getattr(project, '_nn_windows', None)
+        if nw is not None:
+            project.windows = nw
     if p.get('fit_dims', True) and getattr(project, 'dims', None) and project.walls:
         from .fit import fit_to_dimensions
         say(0.88, 'fit')
