@@ -437,7 +437,7 @@ class MainWindow(QMainWindow):
         vals, replace = dlg.values()
         self.settings.setValue('detect_params', vals)
         params.update(vals)
-        work = Project(scale=self.project.scale, scale_calibrated=self.project.scale_calibrated)
+        work = Project(image_path=self.project.image_path, scale=self.project.scale, scale_calibrated=self.project.scale_calibrated)
         self._replace = replace
         self.prog = ProgressDialog(self)
         self.worker = DetectWorker(work, self.view.gray, params)
@@ -457,6 +457,9 @@ class MainWindow(QMainWindow):
         if res.scale_source == 'dims' and not p.scale_calibrated:
             p.scale = res.scale; p.scale_calibrated = True; p.scale_source = 'dims'
             self._update_scale_lbl()
+        elif res.scale_source == 'doors' and not p.scale_calibrated:
+            p.scale = res.scale; p.scale_source = 'doors'
+            self._update_scale_lbl()
         for k in ('walls', 'columns', 'doors', 'windows', 'furniture'):
             if self._replace:
                 setattr(p, k, getattr(res, k))
@@ -475,6 +478,8 @@ class MainWindow(QMainWindow):
             ci = getattr(res, 'chain_info', {})
             if ci.get('windows'):
                 msg += '   |   ' + tr('chains_done').format(ci['windows'], ci['chains'])
+        if res.scale_source == 'doors' and not p.scale_calibrated:
+            msg = tr('scale_doors').format(res.scale) + '   |   ' + msg
         self.hint.setText(msg)
 
     def fit_dims(self):

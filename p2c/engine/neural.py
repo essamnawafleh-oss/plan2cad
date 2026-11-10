@@ -308,3 +308,50 @@ def trim_overshoots(walls, scale):
     for w, (a, b) in zip(walls, new):
         w.pts = [tuple(map(float, a)), tuple(map(float, b))]
     return walls
+
+
+def _door_scale(prob_door, door_w=0.82):
+    n, lab, st, _ = cv2.connectedComponentsWithStats((prob_door > 0.5).astype(np.uint8), 8)
+    Ls = []
+    for i in range(1, n):
+        if st[i][4] < 20:
+            continue
+        ys, xs = np.nonzero(lab[st[i][1]:st[i][1] + st[i][3], st[i][0]:st[i][0] + st[i][2]] == i)
+        (_, _), (w, h), _ = cv2.minAreaRect(np.c_[xs, ys].astype(np.float32))
+        if max(w, h) > 2.5 * min(w, h) + 1:
+            Ls.append(max(w, h))
+    if len(Ls) < 3:
+        return None, len(Ls)
+    return door_w / float(np.median(Ls)), len(Ls)
+
+
+def estimate_scale(gray, progress=None):
+    """Scale (m/px) of a drawing without dimensions: the network is run at several trial scales and the
+    one at which the doors it finds are a normal door width (self-consistent) is kept."""
+    grid = [0.006, 0.0085, 0.012, 0.017, 0.024, 0.034, 0.045]
+    res = []
+    for k, s in enumerate(grid):
+        p = segment(gray, s)
+        imp, n = _door_scale(p[2])
+        res.append((s, imp, n))
+        if progress:
+            progress((k + 1) / len(grid))
+    best = None
+    for (s0, i0, n0), (s1, i1, n1) in zip(res, res[1:]):
+        if not i0 or not i1:
+            continue
+        r0, r1 = math.log(i0 / s0), math.log(i1 / s1)
+        if r0 >= 0 >= r1:                                   # implied scale crosses the trial scale
+            f = r0 / (r0 - r1) if r0 != r1 else 0.5
+            s = math.exp(math.log(s0) + f * (math.log(s1) - math.log(s0)))
+            if best is None or n0 + n1 > best[1]:
+                best = (s, n0 + n1)
+    if best is None:                                        # no crossing: closest agreement
+        ok = [(abs(math.log(i / s)), s, i) for s, i, n in res if i]
+        if not ok:
+            return None
+        e, s, i = min(ok)
+        if e > 0.35:
+            return None
+        return math.sqrt(s * i)
+    return best[0]

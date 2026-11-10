@@ -109,6 +109,7 @@ S = {
     'about_text': ('<b>Plan2CAD 1.0</b><br>تحويل صور المخططات المعمارية إلى ملفات DXF بطبقات وبلوكات.<br><br>تطوير: <b>عصام النوافلة</b> — Essam Nawafleh',
                    '<b>Plan2CAD 1.0</b><br>Turns scanned architectural plans into layered DXF files with blocks.<br><br>Developed by <b>Essam Nawafleh</b> — عصام النوافلة'),
     'p_dims': ('قراءة الأبعاد', 'Reading dimensions'),
+    'scale_doors': ('ما في أبعاد مكتوبة، فقدّرت المقياس من عرض الأبواب: {:.4f} م/بكسل (للدقة الكاملة عاير المقياس بخط معروف طوله)', 'No dimensions found; scale estimated from door widths: {:.4f} m/px (calibrate with a known length for full accuracy)'),
     'dims_found': ('قرأت {} رقم، وتأكّدت من {} بُعد على خطوطها. المقياس من الأبعاد: {:.4f} م/بكسل', 'Read {} numbers, confirmed {} dimensions on their lines. Scale from dimensions: {:.4f} m/px'),
     'read_dims': ('اقرأ الأبعاد أولاً (OCR) واضبط المقياس منها', 'Read dimensions first (OCR) and set the scale from them'),
     'p_complete': ('تكميل الجدران من الأبعاد', 'Completing walls from dimensions'),

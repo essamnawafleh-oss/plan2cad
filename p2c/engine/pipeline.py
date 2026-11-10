@@ -66,6 +66,15 @@ def run(project, gray, params=None, progress=None):
         wv = wv.copy(); wv[(clean == 255) & (gray_full != 255)] = 255          # text / dimension clutter removed
         gray = wv
     nn_img = gray if wv is not None else gray_full
+    # no calibration and no dimensions: estimate the scale from the doors the network sees
+    if not project.scale_calibrated and p.get('use_nn', True) and p.get('auto_scale', True):
+        from . import neural as NN
+        if NN.available():
+            say(0.37, 'scale')
+            se = NN.estimate_scale(nn_img, progress=lambda f: say(0.37 + 0.15 * f, 'scale'))
+            if se and 0.002 < se < 0.2:
+                project.scale = se; project.scale_source = 'doors'
+                s = se
     if p['do_walls']:
         say(0.55, 'walls')
         nn_prob = None
