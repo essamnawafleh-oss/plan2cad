@@ -232,10 +232,13 @@ def openings_from_prob(prob, walls, scale):
             if (s1 - s0) * scale < 0.4:
                 continue
             p0, p1 = a + u * s0, a + u * s1
+            c = float(np.mean(prob[cls][ys, xs].astype(np.float32)))       # mean class probability = confidence
+            org = 'auto' if c >= 0.6 else 'uncertain'
             if cls == 3:
-                windows.append(Window(tuple(map(float, p0)), tuple(map(float, p1)), t))
+                windows.append(Window(tuple(map(float, p0)), tuple(map(float, p1)), t, conf=round(c, 3), origin=org))
             else:
-                doors.append(Door(tuple(map(float, p0)), tuple(map(float, p1)), 1, bool((s1 - s0) * scale > 1.3)))
+                doors.append(Door(tuple(map(float, p0)), tuple(map(float, p1)), 1, bool((s1 - s0) * scale > 1.3),
+                                  conf=round(c, 3), origin=org))
     return doors, windows
 
 
@@ -276,6 +279,10 @@ def orient_doors(doors, gray, scale):
                         best = cand
         sc, h, o, sd = best
         d.p0, d.p1, d.side = tuple(map(float, h)), tuple(map(float, o)), int(sd)
+        # no visible swing arc: the opening is real (network) but hinge/swing are a guess
+        d.swing_conf = round(float(sc), 3)
+        if sc < 0.25:
+            d.conf = round(min(getattr(d, 'conf', 1.0), 0.45), 3); d.origin = 'uncertain'
         out.append(d)
     return out
 

@@ -229,10 +229,11 @@ def join_with_evidence(walls, gray, scale, max_gap=0.6, free_gap=0.12, prob_wall
             if best is None:
                 continue
             dd, j = best
-            if dd * scale > free_gap and not gap_evidence(gray, b, b + d * dd, tp, thr, prob_wall):
+            vis = max(0.0, dd - tp / 2)                   # visible gap: from the square cap to the other face
+            if vis * scale > free_gap and not gap_evidence(gray, b + d * tp / 2, b + d * dd, tp, thr, prob_wall):
                 if log is not None:
                     log.append(dict(action='join_refused', reason='no wall material in the gap',
-                                    gap_m=round(dd * scale, 3), at=list(map(float, b))))
+                                    gap_m=round(vis * scale, 3), at=list(map(float, b))))
                 continue
             new = b + d * (dd + walls[j].t / scale / 2)
             pts = list(w.pts); pts[end] = tuple(map(float, new)); w.pts = pts

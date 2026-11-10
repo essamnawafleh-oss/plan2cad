@@ -35,6 +35,8 @@ def walls_union(project, cut_windows=True):
     if not polys:
         return None
     U = unary_union(polys)
+    if not U.is_valid:                     # repair self-intersections instead of exporting a broken outline
+        U = U.buffer(0)
     if cut_windows and project.windows:
         U = U.difference(unary_union([window_cut(wi, project.scale) for wi in project.windows]))
     return U.simplify(0.15)

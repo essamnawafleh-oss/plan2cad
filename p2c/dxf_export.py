@@ -19,6 +19,82 @@ LAYER_STYLE = {  # name: (aci color, lineweight 1/100 mm, plot)
 }
 
 
+def _arc_from_points(pts, T, s):
+    """Circle through the first, middle and last point of a swing polyline -> (centre, r, a0, a1) in DXF
+    space with a counter-clockwise sweep, or None when degenerate."""
+    import math
+    import numpy as np
+    if len(pts) < 3:
+        return None
+    P = np.array([T(*p) for p in pts], float)
+    a, b, c = P[0], P[len(P) // 2], P[-1]
+    d = 2 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]))
+    if abs(d) < 1e-12:
+        return None
+    ux = ((a @ a) * (b[1] - c[1]) + (b @ b) * (c[1] - a[1]) + (c @ c) * (a[1] - b[1])) / d
+    uy = ((a @ a) * (c[0] - b[0]) + (b @ b) * (a[0] - c[0]) + (c @ c) * (b[0] - a[0])) / d
+    ctr = np.array([ux, uy]); r = float(np.linalg.norm(a - ctr))
+    ang = lambda q: math.degrees(math.atan2(q[1] - uy, q[0] - ux)) % 360
+    a0, am, a1 = ang(a), ang(b), ang(c)
+    ccw = (am - a0) % 360 < (a1 - a0) % 360            # the sweep a0->a1 CCW passes the middle point
+    return (tuple(map(float, ctr)), r, a0, a1) if ccw else (tuple(map(float, ctr)), r, a1, a0)
+
+
+def verify_dxf(path, project=None):
+    """Re-open an exported file and check it: parse + ezdxf audit, units, referenced layers / text styles /
+    blocks / linetypes exist, finite coordinates, expected entity counts.  Returns a report dict with
+    'ok' and a list of 'problems'."""
+    import math
+    import ezdxf
+    rep = dict(ok=True, problems=[], counts={})
+    try:
+        doc = ezdxf.readfile(path)
+    except Exception as e:
+        return dict(ok=False, problems=[f'cannot read: {e}'], counts={})
+    aud = doc.audit()
+    if aud.has_errors:
+        rep['problems'] += [f'audit: {e.message}' for e in aud.errors][:20]
+    if aud.has_fixes:                                     # something was broken and had to be repaired on load
+        rep['problems'] += [f'audit fix: {e.message}' for e in aud.fixes][:20]
+    if doc.header.get('$INSUNITS') != 6:
+        rep['problems'].append('drawing units are not metres')
+    msp = doc.modelspace()
+    for e in msp:
+        lay = e.dxf.get('layer', '0')
+        if lay not in doc.layers:
+            rep['problems'].append(f'{e.dxftype()} on missing layer {lay}')
+        st = e.dxf.get('style', None) if e.dxftype() in ('TEXT', 'MTEXT') else None
+        if st and st not in doc.styles:
+            rep['problems'].append(f'text style {st} missing')
+        lt = e.dxf.get('linetype', None)
+        if lt and lt not in ('BYLAYER', 'BYBLOCK') and lt not in doc.linetypes:
+            rep['problems'].append(f'linetype {lt} missing')
+        if e.dxftype() == 'INSERT' and e.dxf.name not in doc.blocks:
+            rep['problems'].append(f'block {e.dxf.name} missing')
+        if e.dxftype() == 'LWPOLYLINE':
+            if any(not (math.isfinite(x) and math.isfinite(y)) for x, y in e.get_points('xy')):
+                rep['problems'].append('non-finite polyline vertex')
+        key = f"{e.dxftype()}@{lay}"
+        rep['counts'][key] = rep['counts'].get(key, 0) + 1
+    if project is not None:
+        exp = dict(doors=len(project.doors), columns=len(project.columns), furniture=len(project.furniture))
+        got_cols = rep['counts'].get('LWPOLYLINE@A-COLUMN', 0)
+        if got_cols != exp['columns']:
+            rep['problems'].append(f'columns: expected {exp["columns"]}, found {got_cols}')
+        arcs = rep['counts'].get('ARC@A-DOOR-SWING', 0) + rep['counts'].get('LWPOLYLINE@A-DOOR-SWING', 0)
+        want = sum(2 if d.double else 1 for d in project.doors)
+        if arcs != want:
+            rep['problems'].append(f'door swings: expected {want}, found {arcs}')
+        ins = sum(v for k, v in rep['counts'].items() if k.startswith('INSERT@'))
+        want_f = sum(1 for f in project.furniture if f.block in GEO)
+        if ins != want_f:
+            rep['problems'].append(f'furniture blocks: expected {want_f}, found {ins}')
+        if project.walls and rep['counts'].get('LWPOLYLINE@A-WALL', 0) == 0:
+            rep['problems'].append('walls missing')
+    rep['ok'] = not rep['problems']
+    return rep
+
+
 def _max_y(project):
     """Image height to flip y when no image size is given: the lowest point of the geometry."""
     ys = [0.0]
@@ -53,6 +129,8 @@ def export_dxf(project, path, image_size=None, working_image_file=None,
         L.dxf.lineweight = lw
         L.dxf.plot = 1 if plot else 0
     doc.layers.get('A-SCAN').off(); doc.layers.get('A-TRACE').off()
+    if 'P2C_TEXT' not in doc.styles:                     # Arial ships with Windows and covers Arabic
+        doc.styles.new('P2C_TEXT', dxfattribs={'font': 'arial.ttf'})
     msp = doc.modelspace()
 
     def pl(pts, layer, closed=False):
@@ -72,7 +150,13 @@ def export_dxf(project, path, image_size=None, working_image_file=None,
     for d in project.doors:
         leaves, arcs = door_geometry(d, s)
         for l in leaves: pl(l, 'A-DOOR', True)
-        for a in arcs: pl(a, 'A-DOOR-SWING')
+        for a in arcs:                                   # true ARC entities (editable radius / angles)
+            arc = _arc_from_points(a, T, s)
+            if arc is None:
+                pl(a, 'A-DOOR-SWING')
+            else:
+                c, r, a0, a1 = arc
+                msp.add_arc(c, r, a0, a1, dxfattribs={'layer': 'A-DOOR-SWING'})
     for st in project.stairs:
         lines, arrow = stair_geometry(st, s)
         for l in lines: pl(l, 'A-STAIR')
@@ -101,7 +185,7 @@ def export_dxf(project, path, image_size=None, working_image_file=None,
             doc.layers.add(p.layer)
         pl(p.pts, p.layer, p.closed)
     for t in project.texts:
-        msp.add_text(t.text, height=t.h, dxfattribs={'layer': 'A-TEXT', 'style': 'OpenSans'}).set_placement(
+        msp.add_text(t.text, height=t.h, dxfattribs={'layer': 'A-TEXT', 'style': 'P2C_TEXT'}).set_placement(
             T(t.x, t.y), align=TextEntityAlignment.MIDDLE_CENTER)
     for lv in project.levels:
         x, y = T(lv.x, lv.y); r = 0.15
@@ -109,12 +193,13 @@ def export_dxf(project, path, image_size=None, working_image_file=None,
         msp.add_line((x - r*1.4, y), (x + r*1.4, y), dxfattribs={'layer': 'A-LEVEL'})
         msp.add_line((x, y - r*1.4), (x, y + r*1.4), dxfattribs={'layer': 'A-LEVEL'})
         msp.add_line((x, y), (x + 1.1, y), dxfattribs={'layer': 'A-LEVEL'})
-        msp.add_text(lv.value, height=0.25, dxfattribs={'layer': 'A-LEVEL'}).set_placement((x + 0.2, y + 0.06))
+        msp.add_text(lv.value, height=0.25, dxfattribs={'layer': 'A-LEVEL', 'style': 'P2C_TEXT'}).set_placement((x + 0.2, y + 0.06))
     if project.dims:
         if 'P2C_DIM' not in doc.dimstyles:
             ds = doc.dimstyles.new('P2C_DIM')
             ds.dxf.dimtxt = 0.18; ds.dxf.dimasz = 0.12; ds.dxf.dimtsz = 0.12; ds.dxf.dimexo = 0.05
             ds.dxf.dimexe = 0.1; ds.dxf.dimgap = 0.05; ds.dxf.dimdec = 2; ds.dxf.dimclrt = 1
+            ds.dxf.dimtxsty = 'P2C_TEXT'
         for dm in project.dims:
             try:
                 dim = msp.add_aligned_dim(p1=T(*dm.p0), p2=T(*dm.p1), distance=0.0, dimstyle='P2C_DIM',

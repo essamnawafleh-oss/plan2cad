@@ -164,6 +164,13 @@ def run(project, gray, params=None, progress=None):
             cols = [c for c in cols if not WU.contains(_P(c.x, c.y))]
         H, W = gray.shape[:2]; mb = 0.04 * min(H, W)
         cols = [c for c in cols if mb < c.x < W - mb and mb < c.y < H - mb]          # page-edge blobs
+        g_dark = gray < 110
+        for c in cols:                                                 # confidence = how solid the blob is
+            r = max(1, int(c.s / s / 2))
+            y0, x0 = int(c.y), int(c.x)
+            patch = g_dark[max(0, y0 - r):y0 + r + 1, max(0, x0 - r):x0 + r + 1]
+            c.conf = round(float(patch.mean()) if patch.size else 0.0, 3)
+            c.origin = 'auto' if c.conf >= 0.6 else 'uncertain'
         project.columns = cols
     if p['do_doors'] and project.walls:
         say(0.74, 'doors')
@@ -174,6 +181,8 @@ def run(project, gray, params=None, progress=None):
             nd = NN.orient_doors(nd, gray_full, s)
             keep = [d for d in project.doors if all(math.dist(((d.p0[0]+d.p1[0])/2, (d.p0[1]+d.p1[1])/2),
                     ((e.p0[0]+e.p1[0])/2, (e.p0[1]+e.p1[1])/2)) > 0.4 / s for e in nd)]
+            for d in keep:                                             # rule doors next to network ones
+                d.conf, d.origin = 0.55, 'auto'
             project.doors = nd + keep
             project._nn_windows = nw
     if p['do_windows'] and project.walls:
@@ -189,7 +198,12 @@ def run(project, gray, params=None, progress=None):
     if p.get('chain_windows', True) and getattr(project, 'dims', None) and project.walls:
         from .chains import windows_from_chains
         say(0.89, 'chains')
+        n0 = len(project.windows)
         windows_from_chains(project, gray_full)
+        for w in project.windows[n0:]:
+            w.origin = 'fixed'; w.conf = 0.7
+            project.corrections.append(dict(action='window_from_chain', p0=list(w.p0), p1=list(w.p1),
+                                            reason='facade dimension chain'))
         if p.get('fit_dims', True):
             from .fit import fit_to_dimensions
             fit_to_dimensions(project)
@@ -213,6 +227,17 @@ def run(project, gray, params=None, progress=None):
             sp = c.s / s
             cv2.circle(mask, (int(c.x), int(c.y)), int(sp * 0.8), 255, -1)
         project.furniture = D.detect_furniture(gray, s, mask, p)
+    for kind in ('walls', 'doors', 'windows', 'columns'):
+        for o in getattr(project, kind):
+            if getattr(o, 'origin', '') == '':
+                o.origin = 'auto'; o.conf = min(getattr(o, 'conf', 1.0), 0.8)
+    # ---- geometric validation: safe fixes are applied (and logged), everything else is reported
+    from . import validate as VAL
+    say(0.95, 'validate')
+    if not hasattr(project, 'corrections') or project.corrections is None:
+        project.corrections = []
+    VAL.auto_fix(project, log=project.corrections)
+    project.validation = VAL.validate(project)
     project._nn_prob = None; project._nn_windows = None        # free the probability maps (hundreds of MB)
     say(1.0, 'done')
     return project
