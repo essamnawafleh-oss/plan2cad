@@ -15,7 +15,7 @@ from ..engine import imageio, pipeline
 from ..dxf_export import export_dxf
 from .canvas import PlanView
 from .panels import LayersPanel, LibraryPanel, PropertiesPanel
-from .dialogs import ImportDialog, DetectDialog, ExportDialog, DetectWorker, ProgressDialog
+from .dialogs import ImportDialog, DetectDialog, ExportDialog, DetectWorker, ProgressDialog, AIDialog, AIWorker
 from .icons import icon
 from . import theme
 from .i18n import tr, LANG, layer_name, is_rtl
@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         self.a_saveas = self._act('save_as', None, lambda: self.save_project(as_new=True), 'Ctrl+Shift+S')
         self.a_export = self._act('export', 'export', self.export, 'Ctrl+E')
         self.a_auto = self._act('auto', 'auto', self.auto_detect, 'Ctrl+D')
+        self.a_ai = self._act('ai', 'auto', self.ai_trace, 'Ctrl+J')
         self.a_undo = self._act('undo', 'undo', self.view.undo, 'Ctrl+Z')
         self.a_redo = self._act('redo', 'redo', self.view.redo, 'Ctrl+Y')
         self.a_fit = self._act('fit', 'fit', self.view.fit, 'Ctrl+0')
@@ -149,6 +150,10 @@ class MainWindow(QMainWindow):
         auto_btn = QToolButton(); auto_btn.setDefaultAction(self.a_auto); auto_btn.setObjectName('primary')
         auto_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon); auto_btn.setIconSize(QSize(18, 18))
         tb.addWidget(auto_btn)
+        ai_btn = QToolButton(); ai_btn.setDefaultAction(self.a_ai); ai_btn.setObjectName('primary')
+        ai_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon); ai_btn.setIconSize(QSize(18, 18))
+        ai_btn.setStyleSheet("QToolButton#primary { background: #8B5CF6; } QToolButton#primary:hover { background: #9D74F8; }")
+        tb.addWidget(ai_btn)
         tb.addAction(self.a_fit_dims)
         tb.addSeparator()
         tb.addAction(self.a_undo); tb.addAction(self.a_redo); tb.addAction(self.a_fit)
@@ -214,7 +219,7 @@ class MainWindow(QMainWindow):
         for a in (self.a_undo, self.a_redo, None, self.a_all, self.a_del, self.a_clear):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu(tr('tools'))
-        m.addAction(self.a_auto); m.addAction(self.a_fit_dims); m.addAction(self.a_dim_rep); m.addSeparator()
+        m.addAction(self.a_auto); m.addAction(self.a_ai); m.addAction(self.a_fit_dims); m.addAction(self.a_dim_rep); m.addSeparator()
         for key, _, _ in TOOLS:
             m.addAction(self.tool_actions[key])
         m = mb.addMenu(tr('view'))
@@ -507,6 +512,49 @@ class MainWindow(QMainWindow):
         tab.horizontalHeader().setStretchLastSection(True)
         lay.addWidget(tab)
         dlg.exec()
+
+    def ai_trace(self):
+        if self.view.gray is None:
+            QMessageBox.information(self, 'Plan2CAD', tr('no_image')); return
+        from ..engine import ai_trace as AI
+        n, est = AI.estimate_cost(self.view.gray)
+        dlg = AIDialog(n, est, self.settings.value('api_key', ''), self)
+        if dlg.exec() != AIDialog.DialogCode.Accepted:
+            return
+        key, effort = dlg.values()
+        if not key:
+            QMessageBox.warning(self, 'Plan2CAD', tr('ai_nokey')); return
+        self.settings.setValue('api_key', key)
+        p = self.project
+        work = Project(scale=p.scale, scale_calibrated=p.scale_calibrated)
+        need_auto = not p.trace
+        if not need_auto:
+            work.angles, work.trace, work.dims, work.texts_raw = list(p.angles), p.trace, list(p.dims), list(p.texts_raw)
+            work.walls, work.doors, work.columns = list(p.walls), list(p.doors), list(p.columns)
+        self.prog = ProgressDialog(self); self.prog.setWindowTitle(tr('ai_working'))
+        self.aiw = AIWorker(work, self.view.gray, key, effort, need_auto)
+        self.aiw.progress.connect(self.prog.set)
+        self.aiw.done.connect(self._ai_done)
+        self.aiw.failed.connect(self._detect_failed)
+        self.aiw.start()
+        self.prog.exec()
+
+    def _ai_done(self, res):
+        self.prog.accept()
+        info = getattr(res, 'ai_info', {}) or {}
+        if not info.get('ok'):
+            QMessageBox.critical(self, 'Plan2CAD', tr('ai_fail').format((info.get('errors') or ['?'])[0])); return
+        v = self.view; p = self.project
+        v.push_undo()
+        for k in ('walls', 'columns', 'doors', 'windows', 'stairs', 'furniture', 'texts'):
+            setattr(p, k, getattr(res, k))
+        p.angles, p.trace, p.dims, p.texts_raw = res.angles, res.trace, res.dims, res.texts_raw
+        if not p.scale_calibrated and res.scale_calibrated:
+            p.scale, p.scale_calibrated = res.scale, True
+            self._update_scale_lbl()
+        v.rebuild(full=True); v.commit()
+        self.hint.setText(tr('ai_done').format(info['walls'], info['doors'], info['windows'], info['furniture'],
+                                               info['tiles'], info['ok'], info['cost']))
 
     def _detect_failed(self, msg):
         self.prog.reject()

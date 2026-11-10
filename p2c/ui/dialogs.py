@@ -151,3 +151,58 @@ class ProgressDialog(QDialog):
     def set(self, f, msg):
         self.bar.setValue(int(f * 100))
         self.lab.setText(tr('p_' + msg) if msg else '')
+
+
+class AIDialog(QDialog):
+    def __init__(self, n_tiles, est, key, parent=None):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QLineEdit
+        self.setWindowTitle(tr('ai_title'))
+        self.setMinimumWidth(540)
+        self.n, self.est = n_tiles, est
+        lay = QVBoxLayout(self); lay.setContentsMargins(SP['xl'], SP['xl'], SP['xl'], SP['xl']); lay.setSpacing(SP['l'])
+        lay.addWidget(_title(tr('ai_title')))
+        intro = QLabel(tr('ai_intro')); intro.setObjectName('caption'); intro.setWordWrap(True)
+        lay.addWidget(intro)
+        form = QFormLayout(); form.setSpacing(SP['m'])
+        self.key = QLineEdit(key or ''); self.key.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key.setPlaceholderText('sk-ant-...')
+        form.addRow(tr('ai_key'), self.key)
+        help_ = QLabel(tr('ai_key_help')); help_.setObjectName('caption'); help_.setWordWrap(True)
+        form.addRow('', help_)
+        self.q = QComboBox(); self.q.addItem(tr('ai_q_high'), 'high'); self.q.addItem(tr('ai_q_med'), 'medium')
+        self.q.currentIndexChanged.connect(self._upd)
+        form.addRow(tr('ai_quality'), self.q)
+        lay.addLayout(form)
+        self.cost = QLabel(); self.cost.setObjectName('hint'); self.cost.setWordWrap(True)
+        lay.addWidget(self.cost); self._upd()
+        lay.addWidget(_buttons(self, tr('ai_run')))
+
+    def _upd(self):
+        f = 1.0 if self.q.currentData() == 'high' else 0.6
+        self.cost.setText(tr('ai_est').format(self.n, self.est * f))
+
+    def values(self):
+        return self.key.text().strip(), self.q.currentData()
+
+
+class AIWorker(QThread):
+    progress = Signal(float, str)
+    done = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, project, gray, key, effort, need_auto):
+        super().__init__()
+        self.project, self.gray, self.key, self.effort, self.need_auto = project, gray, key, effort, need_auto
+
+    def run(self):
+        try:
+            from ..engine import pipeline, ai_trace
+            if self.need_auto:
+                pipeline.run(self.project, self.gray, {}, progress=lambda f, m='': self.progress.emit(0.25 * f, m))
+            ai_trace.run_ai(self.project, self.gray, api_key=self.key, effort=self.effort,
+                            progress=lambda f, m='': self.progress.emit(0.25 + 0.75 * f if self.need_auto else f, m))
+            self.done.emit(self.project)
+        except Exception:
+            import traceback
+            self.failed.emit(traceback.format_exc())

@@ -1,12 +1,12 @@
 # PyInstaller spec – build with:  pyinstaller Plan2CAD.spec
-from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 block_cipher = None
 a = Analysis(
     ['main.py'],
     pathex=['.'],
-    datas=[('p2c/assets', 'p2c/assets')] + collect_data_files('rapidocr_onnxruntime'),
+    datas=[('p2c/assets', 'p2c/assets')] + collect_data_files('rapidocr_onnxruntime') + collect_data_files('anthropic'),
     binaries=collect_dynamic_libs('onnxruntime'),
-    hiddenimports=['ezdxf', 'shapely', 'cv2', 'numpy', 'rapidocr_onnxruntime', 'onnxruntime'],
+    hiddenimports=['ezdxf', 'shapely', 'cv2', 'numpy', 'rapidocr_onnxruntime', 'onnxruntime'] + collect_submodules('anthropic'),
     excludes=['tkinter', 'matplotlib', 'PySide6.QtWebEngineCore', 'PySide6.QtWebEngineWidgets',
               'PySide6.Qt3DCore', 'PySide6.QtQuick', 'PySide6.QtQml', 'PySide6.QtMultimedia'],
     cipher=block_cipher,
