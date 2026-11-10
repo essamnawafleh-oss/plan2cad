@@ -113,9 +113,44 @@ No new runtime dependency. `pytest` is used for tests only (`requirements-dev.tx
 
 The original `e2e.py` UI script also passes against v2 ("E2E OK").
 
-## 7. Benchmark (before / after)
+## 7. Benchmark (before / after): summary
 
-See section 13 (generated tables) and `bench_results/`.
+Same cases, seeds and harness for both versions; 0 errored runs in each. Full tables are in section 13.
+
+| Group (means) | Wall F1 | IoU | Precision | Recall | False walls / plan | Time (s) | Peak MB |
+|---|---|---|---|---|---|---|---|
+| Photos, calibrated (6 runs) | 0.831 → **0.973** | 0.721 → **0.906** | 0.788 → 0.953 | 0.937 → 0.994 | 3.67 → 1.00 | 30.0 → 8.4 | 2332 → 1533 |
+| Photos, uncalibrated (6) | 0.810 → **0.976** | 0.742 → **0.887** | 0.749 → 0.959 | 0.929 → 0.994 | 4.67 → 0.50 | 32.2 → 11.6 | 2329 → 1533 |
+| Scans, calibrated (18) | 0.951 → **0.965** | 0.783 → **0.869** | 0.915 → 0.946 | 0.992 → 0.985 | 1.83 → 1.61 | 11.0 → 9.6 | 1487 → 1490 |
+| Scans, uncalibrated (18) | 0.954 → **0.973** | 0.782 → **0.880** | 0.914 → 0.955 | 0.998 → 0.992 | 1.06 → 0.72 | 12.9 → 12.7 | 1486 → 1490 |
+| Real plan 1 (hand-traced) | 0.666 → 0.688 | 0.408 → 0.399 | 0.589 → 0.620 | 0.765 → 0.772 | 111 → 103 | 61.3 → 60.7 | 6022 → 6047 |
+
+**Where v2 is worse (measured):**
+- **Scans:**
+  - Door F1 0.995 → 0.969 (calibrated) and 0.991 → 0.971 (uncalibrated).
+  - Junction connectivity 0.98 → 0.95.
+  - Recall 0.992 → 0.985.
+  - Endpoint error 0.037 → 0.043 m (calibrated).
+
+  The cause is the evidence-gated join: v2 refuses some joins that the old free 0.6 m extension made, so a few wall ends stay open and are reported as `open_gap` instead.
+- **Real plan 1:**
+  - Thickness error 0.076 → 0.107 m. Thickness is now measured from the drawn band. On this scan that band includes hatching and adjacent lines, while the hand-traced reference uses nominal 0.12 / 0.20 / 0.30 m values.
+  - IoU 0.408 → 0.399, essentially unchanged.
+- **Uncalibrated scale error:** improved only slightly (0.112 → 0.096 on photos, 0.086 → 0.085 on scans). Door-based estimation is still about ±10%; calibrate when no dimensions are written.
+
+**Preprocessing configurations** (photos, calibrated, 6 runs; same code):
+
+| Config | Wall F1 | IoU | Endpoint err (m) | Time (s) |
+|---|---|---|---|---|
+| default (perspective auto, lighting auto, denoise auto, deskew) | **0.973** | **0.906** | 0.042 | 9.0 |
+| denoise always on | 0.973 | 0.902 | 0.042 | 8.9 |
+| lighting off | 0.969 | 0.892 | 0.040 | 24.6 |
+| perspective off | 0.915 | 0.808 | 0.101 | 13.1 |
+| all preprocessing off | 0.928 | 0.695 | 0.120 | 33.5 |
+
+The defaults are the best measured configuration. Forcing denoise on brings no gain, so it stays automatic. On scans all configurations give the same result, because the automatic steps correctly do nothing on clean scans.
+
+Large image (6000×8000, segmentation only): peak RSS 2249 MB → 1326 MB. Time 6.6 s → 8.4 s, measured while the benchmark was also running, so the timing is not reliable.
 
 ## 8. Known limitations
 
@@ -142,7 +177,16 @@ See section 13 (generated tables) and `bench_results/`.
 
 ## 11. Windows build verification
 
-See the CI run on branch `v2` (status recorded in the final message). It runs the model-loading check, the pytest suite on windows-latest, PyInstaller and Inno Setup.
+CI run 42908726589 on branch `v2` (windows-latest): **success**.
+- Smoke test ✔
+- Model loads ✔ ("model ok")
+- Unit tests ✔ ("70 passed, 1 warning in 17.26s")
+- PyInstaller exe ✔
+- Inno Setup installer ✔
+- Artifact uploaded ✔
+- Release: skipped by design on `v2`
+
+The installed application was not launched on a real Windows desktop from here.
 
 ## 12. Reproducing the benchmark
 
@@ -161,3 +205,215 @@ Cases (`bench/synth.py`):
 Each case runs with seeds 1 and 2, calibrated and uncalibrated.
 
 ## 13. Benchmark results
+
+# Benchmark comparison
+
+Files: `bench_results/baseline.json`, `bench_results/v2.json`
+
+Runs with errors: baseline: 0, v2: 0
+
+## photo drawings, calibrated
+
+| Metric | baseline | v2 |
+|---|---|---|
+| runs | 6 | 6 |
+| Wall F1 | 0.831 | 0.973 |
+| Precision | 0.788 | 0.953 |
+| Recall | 0.937 | 0.994 |
+| IoU | 0.721 | 0.906 |
+| Endpoint err (m) | 0.119 | 0.042 |
+| Thickness err (m) | 0.039 | 0.000 |
+| Junctions connected | 0.89 | 0.97 |
+| Missing walls | 0.50 | 0.00 |
+| False walls | 3.67 | 1.00 |
+| Door F1 | 0.819 | 0.987 |
+| Window F1 | 0.955 | 1.000 |
+| Pipeline time (s) | 30.0 | 8.4 |
+| NN time (s) | 0.4 | 0.3 |
+| Import time (s) | 1.41 | 1.08 |
+| DXF time (s) | 0.43 | 0.20 |
+| Peak memory (MB) | 2332 | 1533 |
+
+## photo drawings, uncalibrated
+
+| Metric | baseline | v2 |
+|---|---|---|
+| runs | 6 | 6 |
+| Wall F1 | 0.810 | 0.976 |
+| Precision | 0.749 | 0.959 |
+| Recall | 0.929 | 0.994 |
+| IoU | 0.742 | 0.887 |
+| Endpoint err (m) | 0.120 | 0.040 |
+| Thickness err (m) | 0.037 | 0.021 |
+| Junctions connected | 0.90 | 0.97 |
+| Missing walls | 0.50 | 0.00 |
+| False walls | 4.67 | 0.50 |
+| Door F1 | 0.901 | 0.957 |
+| Window F1 | 0.921 | 1.000 |
+| Pipeline time (s) | 32.2 | 11.6 |
+| NN time (s) | 3.4 | 3.2 |
+| Import time (s) | 1.40 | 1.06 |
+| DXF time (s) | 0.41 | 0.19 |
+| Peak memory (MB) | 2329 | 1533 |
+| Scale error (rel.) | 0.112 | 0.096 |
+
+## real drawings, calibrated
+
+| Metric | baseline | v2 |
+|---|---|---|
+| runs | 1 | 1 |
+| Wall F1 | 0.666 | 0.688 |
+| Precision | 0.589 | 0.620 |
+| Recall | 0.765 | 0.772 |
+| IoU | 0.408 | 0.399 |
+| Endpoint err (m) | 0.296 | 0.302 |
+| Thickness err (m) | 0.076 | 0.107 |
+| Junctions connected | 0.65 | 0.65 |
+| Missing walls | 38.00 | 34.00 |
+| False walls | 111.00 | 103.00 |
+| Pipeline time (s) | 61.3 | 60.7 |
+| NN time (s) | 1.4 | 1.5 |
+| Import time (s) | 0.34 | 0.33 |
+| DXF time (s) | 0.76 | 0.67 |
+| Peak memory (MB) | 6022 | 6047 |
+
+## scan drawings, calibrated
+
+| Metric | baseline | v2 |
+|---|---|---|
+| runs | 18 | 18 |
+| Wall F1 | 0.951 | 0.965 |
+| Precision | 0.915 | 0.946 |
+| Recall | 0.992 | 0.985 |
+| IoU | 0.783 | 0.869 |
+| Endpoint err (m) | 0.037 | 0.043 |
+| Thickness err (m) | 0.052 | 0.016 |
+| Junctions connected | 0.98 | 0.95 |
+| Missing walls | 0.00 | 0.06 |
+| False walls | 1.83 | 1.61 |
+| Door F1 | 0.995 | 0.969 |
+| Window F1 | 0.962 | 0.978 |
+| Pipeline time (s) | 11.0 | 9.6 |
+| NN time (s) | 0.3 | 0.3 |
+| Import time (s) | 0.11 | 0.14 |
+| DXF time (s) | 0.22 | 0.20 |
+| Peak memory (MB) | 1487 | 1490 |
+
+## scan drawings, uncalibrated
+
+| Metric | baseline | v2 |
+|---|---|---|
+| runs | 18 | 18 |
+| Wall F1 | 0.954 | 0.973 |
+| Precision | 0.914 | 0.955 |
+| Recall | 0.998 | 0.992 |
+| IoU | 0.782 | 0.880 |
+| Endpoint err (m) | 0.040 | 0.039 |
+| Thickness err (m) | 0.059 | 0.022 |
+| Junctions connected | 0.99 | 0.97 |
+| Missing walls | 0.00 | 0.00 |
+| False walls | 1.06 | 0.72 |
+| Door F1 | 0.991 | 0.971 |
+| Window F1 | 0.938 | 0.970 |
+| Pipeline time (s) | 12.9 | 12.7 |
+| NN time (s) | 2.6 | 2.8 |
+| Import time (s) | 0.12 | 0.15 |
+| DXF time (s) | 0.21 | 0.21 |
+| Peak memory (MB) | 1486 | 1490 |
+| Scale error (rel.) | 0.086 | 0.085 |
+
+## Per case (calibrated, wall F1 / IoU)
+
+| Case | seed | baseline | v2 |
+|---|---|---|---|
+| angled | 1 | 0.944 / 0.796 | 0.962 / 0.886 |
+| angled | 2 | 0.968 / 0.834 | 0.973 / 0.923 |
+| clean_filled | 1 | 0.943 / 0.780 | 0.957 / 0.872 |
+| clean_filled | 2 | 0.977 / 0.848 | 0.983 / 0.947 |
+| clean_hatched | 1 | 0.926 / 0.748 | 0.952 / 0.776 |
+| clean_hatched | 2 | 0.972 / 0.797 | 0.983 / 0.851 |
+| clean_hollow | 1 | 0.900 / 0.681 | 0.933 / 0.774 |
+| clean_hollow | 2 | 0.961 / 0.806 | 0.983 / 0.867 |
+| colour_cad | 1 | 0.914 / 0.773 | 0.954 / 0.817 |
+| colour_cad | 2 | 0.972 / 0.796 | 0.983 / 0.864 |
+| photo_persp | 1 | 0.801 / 0.490 | 0.960 / 0.824 |
+| photo_persp | 2 | 0.492 / 0.538 | 0.984 / 0.926 |
+| photo_rot90 | 1 | 0.947 / 0.802 | 0.960 / 0.891 |
+| photo_rot90 | 2 | 0.983 / 0.818 | 0.984 / 0.949 |
+| photo_shadow | 1 | 0.953 / 0.820 | 0.965 / 0.911 |
+| photo_shadow | 2 | 0.812 / 0.857 | 0.984 / 0.935 |
+| real:plan1 | 0 | 0.666 / 0.408 | 0.688 / 0.399 |
+| scan_lowres | 1 | 0.945 / 0.822 | 0.959 / 0.893 |
+| scan_lowres | 2 | 0.978 / 0.827 | 0.984 / 0.884 |
+| scan_noisy | 1 | 0.934 / 0.757 | 0.957 / 0.886 |
+| scan_noisy | 2 | 0.978 / 0.794 | 0.984 / 0.962 |
+| scan_rot3 | 1 | 0.950 / 0.827 | 0.964 / 0.887 |
+| scan_rot3 | 2 | 0.978 / 0.859 | 0.965 / 0.910 |
+| thin_walls | 1 | 0.952 / 0.676 | 0.961 / 0.826 |
+| thin_walls | 2 | 0.928 / 0.666 | 0.928 / 0.826 |
+
+
+### Preprocessing configurations
+
+# Benchmark comparison
+
+Files: `bench_results/pp_default.json`, `bench_results/pp_denoise_on.json`, `bench_results/pp_minimal.json`, `bench_results/pp_no_light.json`, `bench_results/pp_no_persp.json`
+
+Runs with errors: pp_default: 0, pp_denoise_on: 0, pp_minimal: 0, pp_no_light: 0, pp_no_persp: 0
+
+## photo drawings, calibrated
+
+| Metric | pp_default | pp_denoise_on | pp_minimal | pp_no_light | pp_no_persp |
+|---|---|---|---|---|---|
+| runs | 6 | 6 | 6 | 6 | 6 |
+| Wall F1 | 0.973 | 0.973 | 0.928 | 0.969 | 0.915 |
+| Precision | 0.953 | 0.953 | 0.898 | 0.949 | 0.910 |
+| Recall | 0.994 | 0.994 | 0.961 | 0.990 | 0.935 |
+| IoU | 0.906 | 0.902 | 0.695 | 0.892 | 0.808 |
+| Endpoint err (m) | 0.042 | 0.042 | 0.120 | 0.040 | 0.101 |
+| Thickness err (m) | 0.000 | 0.000 | 0.015 | 0.009 | 0.004 |
+| Junctions connected | 0.97 | 0.97 | 0.88 | 0.97 | 0.89 |
+| Missing walls | 0.00 | 0.00 | 0.00 | 0.00 | 0.50 |
+| False walls | 1.00 | 1.00 | 2.33 | 1.33 | 2.17 |
+| Door F1 | 0.987 | 0.974 | 0.827 | 0.972 | 0.954 |
+| Window F1 | 1.000 | 1.000 | 1.000 | 1.000 | 0.937 |
+| Pipeline time (s) | 9.0 | 8.9 | 33.5 | 24.6 | 13.1 |
+| NN time (s) | 0.3 | 0.3 | 0.4 | 0.3 | 0.4 |
+| Import time (s) | 1.04 | 1.12 | 0.01 | 0.94 | 1.60 |
+| DXF time (s) | 0.20 | 0.20 | 0.37 | 0.36 | 0.23 |
+| Peak memory (MB) | 1536 | 1538 | 2097 | 2158 | 1882 |
+
+## scan drawings, calibrated
+
+| Metric | pp_default | pp_denoise_on | pp_minimal | pp_no_light | pp_no_persp |
+|---|---|---|---|---|---|
+| runs | 2 | 2 | 2 | 2 | 2 |
+| Wall F1 | 0.970 | 0.970 | 0.970 | 0.970 | 0.970 |
+| Precision | 0.948 | 0.947 | 0.948 | 0.948 | 0.948 |
+| Recall | 0.994 | 0.994 | 0.994 | 0.994 | 0.994 |
+| IoU | 0.924 | 0.914 | 0.924 | 0.924 | 0.924 |
+| Endpoint err (m) | 0.035 | 0.035 | 0.035 | 0.035 | 0.035 |
+| Thickness err (m) | 0.000 | 0.000 | 0.000 | 0.000 | 0.000 |
+| Junctions connected | 0.97 | 0.97 | 0.97 | 0.97 | 0.97 |
+| Missing walls | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 |
+| False walls | 1.50 | 1.50 | 1.50 | 1.50 | 1.50 |
+| Door F1 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| Window F1 | 1.000 | 1.000 | 1.000 | 1.000 | 1.000 |
+| Pipeline time (s) | 8.1 | 8.4 | 8.3 | 8.0 | 7.9 |
+| NN time (s) | 0.3 | 0.3 | 0.3 | 0.3 | 0.2 |
+| Import time (s) | 0.22 | 0.44 | 0.01 | 0.16 | 0.19 |
+| DXF time (s) | 0.20 | 0.19 | 0.19 | 0.19 | 0.18 |
+| Peak memory (MB) | 1431 | 1434 | 1426 | 1427 | 1431 |
+
+## Per case (calibrated, wall F1 / IoU)
+
+| Case | seed | pp_default | pp_denoise_on | pp_minimal | pp_no_light | pp_no_persp |
+|---|---|---|---|---|---|---|
+| photo_persp | 1 | 0.960 / 0.824 | 0.960 / 0.824 | 0.832 / 0.533 | 0.955 / 0.846 | 0.801 / 0.535 |
+| photo_persp | 2 | 0.984 / 0.926 | 0.984 / 0.926 | 0.882 / 0.596 | 0.984 / 0.926 | 0.794 / 0.629 |
+| photo_rot90 | 1 | 0.960 / 0.891 | 0.960 / 0.872 | 0.960 / 0.871 | 0.960 / 0.871 | 0.960 / 0.891 |
+| photo_rot90 | 2 | 0.984 / 0.949 | 0.984 / 0.945 | 0.983 / 0.950 | 0.983 / 0.950 | 0.984 / 0.949 |
+| photo_shadow | 1 | 0.965 / 0.911 | 0.965 / 0.911 | 0.936 / 0.588 | 0.968 / 0.857 | 0.965 / 0.911 |
+| photo_shadow | 2 | 0.984 / 0.935 | 0.984 / 0.935 | 0.975 / 0.632 | 0.966 / 0.902 | 0.984 / 0.935 |
+| scan_noisy | 1 | 0.957 / 0.886 | 0.956 / 0.877 | 0.957 / 0.886 | 0.957 / 0.886 | 0.957 / 0.886 |
+| scan_noisy | 2 | 0.984 / 0.962 | 0.983 / 0.951 | 0.984 / 0.962 | 0.984 / 0.962 | 0.984 / 0.962 |
