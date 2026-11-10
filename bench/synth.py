@@ -136,11 +136,13 @@ def _wall_poly(a, b, t_px, ext=True):
     return np.array([a - e - n * t_px / 2, b + e - n * t_px / 2, b + e + n * t_px / 2, a - e + n * t_px / 2])
 
 
-def wall_mask(pl, shape=None, cut_doors=True, include_windows=True):
+def wall_mask(pl, shape=None, cut_doors=True, include_windows=True, exact=False):
+    """exact=True: drawn width equals the nominal thickness (fillPoly paints both boundary rows)."""
     W, H = pl.size if shape is None else (shape[1], shape[0])
     m = np.zeros((H, W), np.uint8)
+    sh = 1.0 if exact else 0.0
     for a, b, t in pl.walls:
-        cv2.fillPoly(m, [np.round(_wall_poly(a, b, t / pl.scale)).astype(np.int32)], 255)
+        cv2.fillPoly(m, [np.round(_wall_poly(a, b, t / pl.scale - sh)).astype(np.int32)], 255)
     if cut_doors:
         for a, b in pl.doors:
             t = 0.5 / pl.scale
@@ -157,7 +159,7 @@ def render(pl, style='filled', seed=0, furniture=True, text=True, dims=True):
     W, H = pl.size
     img = np.full((H, W, 3), 255, np.uint8)
     s = pl.scale
-    m = wall_mask(pl)
+    m = wall_mask(pl, exact=True)
     win = np.zeros_like(m)
     for a, b, t in pl.windows:
         cv2.fillPoly(win, [np.round(_wall_poly(a, b, t / s * 1.02, ext=False)).astype(np.int32)], 255)

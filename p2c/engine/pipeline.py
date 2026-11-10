@@ -39,14 +39,16 @@ def run(project, gray, params=None, progress=None):
         if DM.ocr_available():
             say(0.04, 'dims')
             info = DM.analyse(gray, project.angles, progress=lambda f: say(0.04 + 0.30 * f, 'dims'))
-            project.dims_info = {k: info[k] for k in ('scale', 'n_texts', 'n_numbers', 'n_dims', 'agree')}
+            project.dims_info = {k: info.get(k) for k in ('scale', 'n_texts', 'n_numbers', 'n_dims', 'agree', 'units', 'calib')}
             if info['scale'] and info['n_dims'] >= 5 and not project.scale_calibrated:
                 project.scale = info['scale']
                 project.scale_calibrated = True
                 project.scale_source = 'dims'
             from ..model import Dim
             project.dims = [Dim(tuple(map(float, d['seg'][0])), tuple(map(float, d['seg'][1])), d['text'],
-                                float(d['value'])) for d in info['dims']]
+                                float(d['value']), conf=round(float(d.get('conf', 1.0)), 3),
+                                unit=d.get('unit', 'm'), status=d.get('status', ''))
+                            for d in info['dims'] if d.get('status', 'used') == 'used' or 'unit' not in d.get('status', '')]
             project.texts_raw = [(t['text'], [tuple(map(float, q)) for q in t['box']]) for t in info['texts']]
             mask = DM.clutter_mask(gray, info['texts'], info['dims'])
             clean = gray.copy(); clean[mask > 0] = 255
@@ -103,8 +105,23 @@ def run(project, gray, params=None, progress=None):
             SU = _uu([wall_polygon(w, s) for w in solid]).buffer(2)
             lined = [w for w in lined if wall_polygon(w, s).intersection(SU).area < 0.5 * wall_polygon(w, s).area]
         walls = solid + lined
+        project.corrections = []
+        ev = p.get('evidence', True)
+        pw = None
         if nn_prob is not None:
-            walls = D.join_walls(walls, s, p['wall_join'] + 0.15)       # close junction gaps before judging connectivity
+            pw = np.maximum(nn_prob[1], nn_prob[3])
+        if ev:                                # measure every proposed wall on the drawing itself
+            from . import walls as WG
+            say(0.63, 'walls')
+            walls = WG.refine_walls(walls, gray, s, pw, log=project.corrections)
+            project._dbg_after_refine = [(list(w.pts), w.t) for w in walls]
+
+        def _join(ws):
+            if ev:
+                return WG.join_with_evidence(ws, gray, s, p['wall_join'] + 0.15, prob_wall=pw, log=project.corrections)
+            return D.join_walls(ws, s, p['wall_join'] + 0.15)
+        if nn_prob is not None or ev:
+            walls = _join(walls)              # close junction gaps before judging connectivity
         walls = D.prune_isolated_walls(walls, s)
         H, W = gray.shape[:2]; m = max(12, 0.012 * max(H, W))
         walls = [w for w in walls if not all(x < m or y < m or x > W - m or y > H - m for x, y in w.pts)]   # page border
@@ -121,13 +138,19 @@ def run(project, gray, params=None, progress=None):
             ln = _LS(w.pts); tol = 0.35 / s
             return sum(1 for o in walls if o is not w and ln.distance(_LS(o.pts)) < tol) >= 2
         walls = [w for w in walls if not (_edge_line(w) and not _attached(w))]
-        project.walls = D.keep_building(D.join_walls(walls, s, p['wall_join'] + 0.15), s)
+        project.walls = D.keep_building(_join(walls), s)
         if p.get('complete_from_dims', True) and project.dims:
             from .complete import complete_walls
             say(0.66, 'complete')
+            n0 = len(project.walls)
             project.completed = complete_walls(project, gray_full, p)
-            project.walls = D.join_walls(project.walls, s, p['wall_join'] + 0.15)
-        if nn_prob is not None:
+            for w in project.walls[n0:]:
+                w.origin = 'fixed'; w.conf = min(getattr(w, 'conf', 1.0), 0.6)
+                project.corrections.append(dict(action='complete_wall', reason='dimension end without a wall',
+                                                pts=[list(q) for q in w.pts], t=w.t))
+            project.walls = _join(project.walls)
+        if nn_prob is not None or ev:
+            from . import neural as NN
             NN.trim_overshoots(project.walls, s)
         _apply_wall_labels(project)
     if p['do_columns']:

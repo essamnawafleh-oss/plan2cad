@@ -93,16 +93,45 @@ def read_texts(gray, angles, up=3, min_conf=0.5, progress=None):
     return keep
 
 
-def parse_value(t):
-    """'3.45' -> 3.45 ; '1,24' -> 1.24 ; plain integers are ambiguous (cm or truncated) -> None."""
-    t = t.replace(',', '.')
-    if not NUM_RE.match(t) or '.' not in t:
-        return None
+UNIT_RE = re.compile(r'^(\d{1,5}(?:[.,]\d{1,3})?)(mm|cm|m)?$', re.I)
+
+
+def parse_hypotheses(t):
+    """All readings of a dimension text as (value_m, unit, prior).
+    '3.45' / '3,45' -> metres; '3.45m', '345cm', '3450mm' -> explicit unit;
+    a plain integer is ambiguous: '345' may be cm, '3450' may be mm (or cm) -> several hypotheses with
+    lower priors; the drawing-wide scale vote decides which reading is consistent."""
+    t = t.strip().replace(' ', '').replace('\u066b', '.').replace('\u060c', ',')
+    t = t.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹', '01234567890123456789'))
+    m = UNIT_RE.match(t)
+    if not m:
+        return []
+    num, unit = m.group(1).replace(',', '.'), (m.group(2) or '').lower()
     try:
-        v = float(t)
+        v = float(num)
     except ValueError:
-        return None
-    return v if 0.03 <= v <= 200 else None
+        return []
+    out = []
+    if unit:
+        f = {'m': 1.0, 'cm': 0.01, 'mm': 0.001}[unit]
+        out.append((v * f, unit, 1.0))
+    elif '.' in num:
+        if len(num.split('.')[1]) <= 2 or v < 100:
+            out.append((v, 'm', 1.0))
+    else:                                           # integer
+        n = len(num)
+        if 2 <= n <= 4 and num[0] != '0':
+            out.append((v * 0.01, 'cm', 0.7))
+        if 3 <= n <= 5 and num[0] != '0':
+            out.append((v * 0.001, 'mm', 0.5 if n >= 4 else 0.3))
+    return [(val, u, pr) for val, u, pr in out if 0.03 <= val <= 200]
+
+
+def parse_value(t):
+    """Unambiguous value in metres (decimal or explicit unit), else None.  Kept for callers that need
+    a sure reading (e.g. wall-thickness labels)."""
+    h = [x for x in parse_hypotheses(t) if x[2] >= 1.0]
+    return h[0][0] if h else None
 
 
 def measure_dimensions(gray, texts, progress=None, scale_hint=None):
@@ -111,9 +140,10 @@ def measure_dimensions(gray, texts, progress=None, scale_hint=None):
     cache = {}
     dims = []
     for r in texts:
-        v = parse_value(r['text'])
-        if v is None:
+        hyps = parse_hypotheses(r['text'])
+        if not hyps:
             continue
+        v = hyps[0][0]
         key = (round(r['dir'], 2), r['flip'])
         if key not in cache:
             img, M = _rot(gray, r['dir'] + r['flip'])
@@ -168,47 +198,67 @@ def measure_dimensions(gray, texts, progress=None, scale_hint=None):
         TL, TR = ticks(-1), ticks(1)
         if not TL or not TR:
             continue
-        cands = [(xl, xr, v / (xr - xl)) for xl in TL for xr in TR if xr - xl >= max(x1 - x0, 6)]
-        if not cands:
+        pairs = [(xl, xr) for xl in TL for xr in TR if xr - xl >= max(x1 - x0, 6)]
+        if not pairs:
             continue
         if scale_hint:
-            err, xl, xr = min((abs(math.log(c[2] / scale_hint)), c[0], c[1]) for c in cands)
+            err, xl, xr, v, unit = min((abs(math.log(hv / (xr_ - xl_) / scale_hint)), xl_, xr_, hv, hu)
+                                       for xl_, xr_ in pairs for hv, hu, hp in hyps)
             if err > 0.06:
                 continue
         else:
-            d = dict(r); d.update(value=v, cands=[c[2] for c in cands])
+            d = dict(r); d.update(value=v, unit=hyps[0][1],
+                                  hyps=[(hv, hu, hp, [hv / (xr_ - xl_) for xl_, xr_ in pairs]) for hv, hu, hp in hyps],
+                                  cands=[v / (xr_ - xl_) for xl_, xr_ in pairs])
             dims.append(d)
             continue
         L = xr - xl
         seg_r = np.array([[xl, ly], [xr, ly]], float)
         seg = _tf(_inv(M), seg_r)
-        d = dict(r); d.update(value=v, seg=seg, len_px=float(np.linalg.norm(seg[1] - seg[0])),
+        d = dict(r); d.update(value=v, unit=unit, seg=seg, len_px=float(np.linalg.norm(seg[1] - seg[0])),
                               line_y=ly, side=best[1])
         dims.append(d)
     return dims
 
 
 def vote_scale(cand_dims, tol=0.035):
-    """Hough-style vote: each dimension votes once for every scale one of its tick pairs implies."""
+    """Hough-style vote: each dimension votes once (its best reading) for every scale one of its
+    tick pairs implies.  Readings carry priors (decimal metres 1.0, integer-as-cm 0.7, ...).
+    Returns (scale, n_supporting, info) where info tells which unit won and how close the runner-up
+    unit hypothesis came (an ambiguous drawing is reported, not silently guessed)."""
     if not cand_dims:
-        return None, 0
-    allv = np.log(np.concatenate([np.array(d['cands']) for d in cand_dims]))
-    best, bv = None, 0
+        return None, 0, {}
+    items = []
+    for d in cand_dims:
+        hyps = d.get('hyps') or [(d['value'], 'm', 1.0, d['cands'])]
+        items.append([(np.log(np.array(c)), pr, u) for hv, u, pr, c in hyps])
+    allv = np.concatenate([lc for it in items for lc, pr, u in it])
+    best, bv = None, 0.0
+    scores = {}
     for c in np.unique(np.round(allv, 3)):
-        votes = 0.0
-        for d in cand_dims:
-            lc = np.log(np.array(d['cands']))
-            if np.any(np.abs(lc - c) < tol):
-                votes += d['conf'] * (1.0 + min(d['value'], 5.0) / 5.0)
+        votes = 0.0; units = {}
+        for d, it in zip(cand_dims, items):
+            w = 0.0; wu = None
+            for lc, pr, u in it:
+                if np.any(np.abs(lc - c) < tol) and pr > w:
+                    w, wu = pr, u
+            if w:
+                votes += d['conf'] * w * (1.0 + min(d['value'], 5.0) / 5.0)
+                units[wu] = units.get(wu, 0) + 1
+        scores[float(c)] = (votes, units)
         if votes > bv:
             bv, best = votes, c
     sel = []
-    for d in cand_dims:
-        lc = np.log(np.array(d['cands']))
-        k = np.argmin(np.abs(lc - best))
-        if abs(lc[k] - best) < tol:
-            sel.append(lc[k])
-    return float(np.exp(np.median(sel))), len(sel)
+    for it in items:
+        cand = [(abs(lc[np.argmin(np.abs(lc - best))] - best), lc[np.argmin(np.abs(lc - best))]) for lc, pr, u in it]
+        e, v = min(cand)
+        if e < tol:
+            sel.append(v)
+    # runner-up far from the winner (a different unit reading differs by a factor ~10)
+    runner = max([v for c, (v, u) in scores.items() if abs(c - best) > 1.0] or [0.0])
+    info = dict(units=scores[float(best)][1], votes=bv, runner_up=runner,
+                ambiguous=bool(runner > 0.8 * bv))
+    return float(np.exp(np.median(sel))), len(sel), info
 
 
 def estimate_scale(dims, tol=0.06):
@@ -252,42 +302,79 @@ def clutter_mask(gray, texts, dims):
     return m
 
 
+def robust_scale(dims):
+    """Weighted median of per-dimension scales with MAD outlier rejection.
+    Marks every dim with 'status' ('used' or 'rejected:<reason>') and returns (scale, report)."""
+    if not dims:
+        return None, dict(n=0)
+    r = np.array([d['value'] / d['len_px'] for d in dims])
+    w = np.array([d.get('conf', 1.0) * (0.5 + min(d['value'], 6.0) / 6.0) for d in dims])
+    lr = np.log(r)
+    o = np.argsort(lr); cw = np.cumsum(w[o]) / w.sum()
+    med = lr[o][np.searchsorted(cw, 0.5)]
+    mad = float(np.median(np.abs(lr - med))) * 1.4826
+    lim = max(0.03, 3.0 * mad)
+    used = np.abs(lr - med) <= lim
+    for d, u, x in zip(dims, used, lr):
+        if u:
+            d['status'] = 'used'
+        else:
+            dev = (math.exp(x - med) - 1) * 100
+            ratio = math.exp(x - med)
+            why = 'unit?' if abs(math.log10(ratio)) > 0.8 else ('ocr?' if abs(dev) > 8 else 'inconsistent')
+            d['status'] = f'rejected:{why} {dev:+.1f}%'
+    if used.sum() == 0:
+        return None, dict(n=len(dims))
+    s = float(np.exp(np.sum(lr[used] * w[used]) / w[used].sum()))
+    spread = float(np.std(lr[used])) if used.sum() > 1 else 0.0
+    return s, dict(n=len(dims), used=int(used.sum()), rejected=int((~used).sum()), spread_pct=spread * 100)
+
+
 def analyse(gray, angles, progress=None):
-    """Full dimension understanding: OCR -> tick candidates -> voted scale -> exact segments."""
+    """Full dimension understanding: OCR -> tick candidates -> voted scale -> exact segments ->
+    robust calibration with a per-dimension status."""
     say = progress or (lambda f: None)
     texts = read_texts(gray, angles, progress=lambda f: say(0.85 * f))
     cand = measure_dimensions(gray, texts)
-    scale, nvotes = vote_scale(cand)
+    scale, nvotes, vinfo = vote_scale(cand)
     dims = measure_dimensions(gray, texts, scale_hint=scale) if scale else []
-    for d in dims:
-        d['inlier'] = True
-    if len(dims) >= 5:                      # final scale = weighted mean over confirmed segments
-        r = np.array([d['value'] / d['len_px'] for d in dims]); w = np.array([d['value'] for d in dims])
-        scale = float(np.sum(r * w) / w.sum())
-    if len(dims) < 5:                       # not enough evidence -> do not trust
-        scale = None
-    else:                                   # second, thorough pass with the known scale
-        more = measure_with_scale(gray, texts, scale)
+    calib = {}
+    if len(dims) >= 5:
+        more = measure_with_scale(gray, texts, scale, units=vinfo.get('units'))
         seen = [d['box'].mean(axis=0) for d in dims]
         for d in more:
             c = d['box'].mean(axis=0)
             if all(np.linalg.norm(c - q) > 3 for q in seen):
                 dims.append(d); seen.append(c)
+        scale, calib = robust_scale(dims)
+        for d in dims:
+            d['inlier'] = d.get('status') == 'used'
+    else:
+        for d in dims:
+            d['inlier'] = True; d['status'] = 'used'
+        scale = None                                # not enough evidence -> do not trust
+    if scale and vinfo.get('ambiguous'):
+        calib['warning'] = 'unit ambiguous: integer dimensions fit both cm and mm readings'
+        scale = None
     say(1.0)
     return dict(texts=texts, dims=dims, scale=scale, n_texts=len(texts),
-                n_numbers=sum(1 for t in texts if parse_value(t['text']) is not None),
-                n_dims=len(dims), agree=(nvotes / max(len(cand), 1)))
+                n_numbers=sum(1 for t in texts if parse_hypotheses(t['text'])),
+                n_dims=len(dims), agree=(nvotes / max(len(cand), 1)), units=vinfo.get('units', {}),
+                calib=calib)
 
 
-def measure_with_scale(gray, texts, scale, tol=0.07):
+def measure_with_scale(gray, texts, scale, tol=0.07, units=None):
     """Second pass: the scale is known, so every number predicts the length of its dimension line.
     Search rows near the text for a line segment of that length that covers the text, bounded by ticks."""
     cache = {}
     out = []
     for r in texts:
-        v = parse_value(r['text'])
-        if v is None:
+        hyps = parse_hypotheses(r['text'])
+        if not hyps:
             continue
+        # the reading in the drawing's established unit first, then by prior
+        hyps = sorted(hyps, key=lambda h: (h[1] not in (units or {}), -h[2]))
+        v, unit, _ = hyps[0]
         want = v / scale
         if want < 8:
             continue
@@ -336,6 +423,6 @@ def measure_with_scale(gray, texts, scale, tol=0.07):
             continue
         _, xl, xr, y = best
         seg = _tf(_inv(M), np.array([[xl, y], [xr, y]], float))
-        d = dict(r); d.update(value=v, seg=seg, len_px=float(np.linalg.norm(seg[1] - seg[0])), inlier=True)
+        d = dict(r); d.update(value=v, unit=unit, seg=seg, len_px=float(np.linalg.norm(seg[1] - seg[0])), inlier=True)
         out.append(d)
     return out
