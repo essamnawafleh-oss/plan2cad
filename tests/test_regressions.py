@@ -66,3 +66,33 @@ def test_B6_dxf_export_without_image_size_not_mirrored(tmp_path):
     d = ezdxf.readfile(f)
     ys = [v[1] for e in d.modelspace().query('LWPOLYLINE') for v in e.get_points('xy')]
     assert min(ys) >= -0.2, min(ys)                    # world y must stay positive (y up, origin bottom)
+
+
+def test_B7_probability_maps_released_after_detection():
+    """pipeline.run left project._nn_prob (4 x H x W floats) on the project; the UI worker kept the project,
+    so hundreds of MB stayed allocated until the next detection."""
+    from bench import synth
+    from p2c.model import Project
+    from p2c.engine import pipeline, neural as NN
+    if not NN.available():
+        pytest.skip('model not available')
+    img, pl, Hc, _ = synth.make_case('clean_filled', 1)
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    p = Project(scale=pl.scale, scale_calibrated=True)
+    pipeline.run(p, g, dict(read_dims=False))
+    assert getattr(p, '_nn_prob', None) is None
+
+
+def test_B8_user_scale_from_import_dialog_is_kept():
+    """The scale typed in the import dialog was stored without scale_calibrated, so the automatic estimate
+    (doors / dimensions) silently replaced it."""
+    import os
+    os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    QtW = pytest.importorskip('PySide6.QtWidgets')
+    app = QtW.QApplication.instance() or QtW.QApplication([])
+    from p2c.ui.dialogs import ImportDialog
+    d = ImportDialog(0.03)
+    assert 'scale_known' in d.values()
+    d.known.setChecked(True); d.scale.setValue(0.0123)
+    v = d.values()
+    assert v['scale_known'] and abs(v['scale'] - 0.0123) < 1e-9

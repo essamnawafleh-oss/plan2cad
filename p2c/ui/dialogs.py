@@ -104,6 +104,57 @@ class CompareDialog(QDialog):
         lay.addWidget(box)
 
 
+class ValidationDialog(QDialog):
+    """Validation report: severity, message, 'show' and 'fix' per issue."""
+    SEV_COL = {'critical': '#E5484D', 'major': '#F5A524', 'minor': '#3E9BFF', 'info': '#8B8D98'}
+
+    def __init__(self, issues, on_show, on_fix, parent=None, extra=''):
+        super().__init__(parent)
+        from PySide6.QtWidgets import QTreeWidget, QTreeWidgetItem
+        from .i18n import LANG
+        self.setWindowTitle(tr('validation')); self.resize(720, 560)
+        self.on_show, self.on_fix = on_show, on_fix
+        lay = QVBoxLayout(self); lay.setContentsMargins(SP['l'], SP['l'], SP['l'], SP['l'])
+        cnt = {k: 0 for k in self.SEV_COL}
+        for d in issues:
+            cnt[d['severity']] += 1
+        head = QLabel('   '.join(f"{tr('sev_' + k)}: {v}" for k, v in cnt.items()) + (('\n' + extra) if extra else ''))
+        head.setObjectName('section'); head.setWordWrap(True); lay.addWidget(head)
+        self.tree = QTreeWidget(); self.tree.setHeaderLabels([tr('severity'), tr('issue')]); self.tree.setRootIsDecorated(False)
+        self.tree.setColumnWidth(0, 110)
+        self.issues = issues
+        ar = LANG['cur'] == 'ar'
+        for i, d in enumerate(issues):
+            it = QTreeWidgetItem([tr('sev_' + d['severity']), d['msg_ar'] if ar else d['msg_en']])
+            from PySide6.QtGui import QColor
+            it.setForeground(0, QColor(self.SEV_COL[d['severity']]))
+            it.setData(0, Qt.ItemDataRole.UserRole, i)
+            if d.get('fix'):
+                it.setText(1, it.text(1) + '   ⚙')
+            self.tree.addTopLevelItem(it)
+        self.tree.itemDoubleClicked.connect(lambda it, c: self._show(it))
+        lay.addWidget(self.tree, 1)
+        row = QHBoxLayout()
+        b_show = QPushButton(tr('show')); b_show.clicked.connect(lambda: self._show(self.tree.currentItem()))
+        b_fix = QPushButton(tr('fix')); b_fix.clicked.connect(self._fix)
+        b_close = QPushButton(tr('close')); b_close.clicked.connect(self.accept)
+        note = QLabel(tr('fix_note')); note.setObjectName('hint'); note.setWordWrap(True)
+        row.addWidget(b_show); row.addWidget(b_fix); row.addWidget(note, 1); row.addWidget(b_close)
+        lay.addLayout(row)
+
+    def _show(self, it):
+        if it is not None:
+            self.on_show(self.issues[it.data(0, Qt.ItemDataRole.UserRole)])
+
+    def _fix(self):
+        it = self.tree.currentItem()
+        if it is None:
+            return
+        d = self.issues[it.data(0, Qt.ItemDataRole.UserRole)]
+        if d.get('fix') and self.on_fix(d):
+            self.accept()
+
+
 class DetectDialog(QDialog):
     def __init__(self, params, parent=None):
         super().__init__(parent)
@@ -171,18 +222,29 @@ class DetectWorker(QThread):
     done = Signal(object)
     failed = Signal(str)
 
+    cancelled = Signal()
+
     def __init__(self, project, gray, params):
         super().__init__()
         self.project, self.gray, self.params = project, gray, params
+        self._cancel = False
+
+    def request_cancel(self):
+        self._cancel = True
 
     def run(self):
+        from ..engine import pipeline
         try:
-            from ..engine import pipeline
-            pipeline.run(self.project, self.gray, self.params, progress=lambda f, m='': self.progress.emit(f, m))
+            pipeline.run(self.project, self.gray, self.params, progress=lambda f, m='': self.progress.emit(f, m),
+                         cancel=lambda: self._cancel)
             self.done.emit(self.project)
+        except pipeline.Cancelled:
+            self.cancelled.emit()
+        except MemoryError:
+            self.failed.emit(tr('err_memory'))
         except Exception as e:  # pragma: no cover
             import traceback
-            self.failed.emit(traceback.format_exc())
+            self.failed.emit(f"{tr('err_detect')}\n\n{type(e).__name__}: {e}\n\n" + traceback.format_exc()[-1500:])
 
 
 class ProgressDialog(QDialog):
@@ -197,6 +259,21 @@ class ProgressDialog(QDialog):
         self.lab = QLabel(''); self.lab.setObjectName('caption')
         self.bar = QProgressBar(); self.bar.setRange(0, 100); self.bar.setTextVisible(False)
         lay.addWidget(self.lab); lay.addWidget(self.bar)
+        self.cancel_btn = QPushButton(tr('cancel'))
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        lay.addWidget(self.cancel_btn, 0, Qt.AlignmentFlag.AlignRight)
+        self.on_cancel = None
+
+    def _on_cancel(self):
+        self.cancel_btn.setEnabled(False); self.lab.setText(tr('cancelling'))
+        if self.on_cancel:
+            self.on_cancel()
+
+    def reject(self):                       # Esc = cancel request, the worker closes the dialog
+        if self.on_cancel and self.cancel_btn.isEnabled():
+            self._on_cancel()
+        elif not self.on_cancel:
+            super().reject()
 
     def set(self, f, msg):
         self.bar.setValue(int(f * 100))

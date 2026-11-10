@@ -130,6 +130,8 @@ class MainWindow(QMainWindow):
         self.a_fit_dims = self._act('fit_dims', 'calib', self.fit_dims, 'Ctrl+M')
         self.a_dim_rep = self._act('dim_report', None, self.dim_report)
         self.a_compare = self._act('compare', None, self.compare_images)
+        self.a_validate = self._act('validation', None, self.show_validation, 'Ctrl+Shift+V')
+        self.a_origin = self._act('show_origin', None, self.toggle_origin, None, True)
         self.tool_group = QActionGroup(self); self.tool_group.setExclusive(True)
         self.tool_actions = {}
         for key, ic, sc in TOOLS:
@@ -215,11 +217,11 @@ class MainWindow(QMainWindow):
         for a in (self.a_undo, self.a_redo, None, self.a_all, self.a_del, self.a_clear):
             m.addSeparator() if a is None else m.addAction(a)
         m = mb.addMenu(tr('tools'))
-        m.addAction(self.a_auto); m.addAction(self.a_fit_dims); m.addAction(self.a_dim_rep); m.addSeparator()
+        m.addAction(self.a_auto); m.addAction(self.a_fit_dims); m.addAction(self.a_dim_rep); m.addAction(self.a_validate); m.addSeparator()
         for key, _, _ in TOOLS:
             m.addAction(self.tool_actions[key])
         m = mb.addMenu(tr('view'))
-        m.addAction(self.a_fit); m.addAction(self.a_compare)
+        m.addAction(self.a_fit); m.addAction(self.a_compare); m.addAction(self.a_origin)
         for d in (self.d_lib, self.d_layers, self.d_props):
             m.addAction(d.toggleViewAction())
         m = mb.addMenu(tr('help'))
@@ -341,6 +343,41 @@ class MainWindow(QMainWindow):
         self.view.set_tool('select')
         self.hint.setText(tr('h_calib'))
 
+    def toggle_origin(self, on=None):
+        self.view.show_origin = bool(self.a_origin.isChecked())
+        self.view.rebuild(keep_selection=[])
+        if self.view.show_origin:
+            self.hint.setText(tr('origin_legend'))
+
+    def show_validation(self):
+        if self.view.gray is None:
+            return
+        from ..engine import validate as VAL
+        from .dialogs import ValidationDialog
+        iss = VAL.validate(self.project)
+        self.project.validation = iss
+        corr = len(getattr(self.project, 'corrections', []) or [])
+        extra = tr('corrections_n').format(corr) if corr else ''
+
+        def on_show(d):
+            if d.get('at'):
+                from PySide6.QtCore import QPointF
+                self.view.centerOn(QPointF(*d['at']))
+            if d.get('kind') and d.get('index') is not None:
+                for it in self.view.obj_items:
+                    it.setSelected(getattr(it, 'kind', None) == d['kind'] and getattr(it, 'idx', None) == d['index'])
+
+        def on_fix(d):
+            self.view.push_undo()
+            e = VAL.apply_fix(self.project, d)
+            if e is None:
+                return False
+            self.project.corrections.append(dict(e, auto=False))
+            self.view.commit()
+            QTimer.singleShot(0, self.show_validation)          # re-check and reopen with fresh indices
+            return True
+        ValidationDialog(iss, on_show, on_fix, self, extra).exec()
+
     def compare_images(self):
         r = getattr(self, '_import', None)
         if r is None:
@@ -408,9 +445,18 @@ class MainWindow(QMainWindow):
             return
         if not path.lower().endswith('.dxf'):
             path += '.dxf'
-        export_dxf(self.project, path, self.view.image_size, self.work_image,
-                   include_scan=dlg.scan.isChecked(), include_trace=dlg.trace.isChecked())
-        self.hint.setText(tr('exported').format(path))
+        try:
+            export_dxf(self.project, path, self.view.image_size, self.work_image,
+                       include_scan=dlg.scan.isChecked(), include_trace=dlg.trace.isChecked())
+        except Exception as e:
+            QMessageBox.critical(self, 'Plan2CAD', f'{tr("export")}: {type(e).__name__}: {e}'); return
+        from ..dxf_export import verify_dxf
+        rep = verify_dxf(path, self.project)
+        if rep['ok']:
+            self.hint.setText(tr('dxf_ok').format(path))
+        else:
+            self.hint.setText(tr('exported').format(path))
+            QMessageBox.warning(self, 'Plan2CAD', tr('dxf_check_fail') + '\n' + '\n'.join(rep['problems'][:15]))
 
     def clear_layer(self):
         kinds = [('walls', 'A-WALL'), ('columns', 'A-COLUMN'), ('windows', 'A-WINDOW'), ('doors', 'A-DOOR'),
@@ -452,8 +498,14 @@ class MainWindow(QMainWindow):
         self.worker.progress.connect(self.prog.set)
         self.worker.done.connect(self._detect_done)
         self.worker.failed.connect(self._detect_failed)
+        self.worker.cancelled.connect(self._detect_cancelled)
+        self.prog.on_cancel = self.worker.request_cancel
         self.worker.start()
         self.prog.exec()
+
+    def _detect_cancelled(self):
+        self.prog.accept()
+        self.hint.setText(tr('cancelled'))
 
     def _detect_done(self, res):
         self.prog.accept()
@@ -462,6 +514,9 @@ class MainWindow(QMainWindow):
         p.angles = res.angles
         p.trace = res.trace
         p.dims = res.dims; p.texts_raw = res.texts_raw; p.dims_info = res.dims_info; p.chains = res.chains
+        p.validation = getattr(res, 'validation', []); p.corrections = getattr(res, 'corrections', [])
+        p.fit_info = getattr(res, 'fit_info', {}); p.completed = getattr(res, 'completed', 0)
+        p.chain_info = getattr(res, 'chain_info', {})
         if res.scale_source == 'dims' and not p.scale_calibrated:
             p.scale = res.scale; p.scale_calibrated = True; p.scale_source = 'dims'
             self._update_scale_lbl()
@@ -488,6 +543,12 @@ class MainWindow(QMainWindow):
                 msg += '   |   ' + tr('chains_done').format(ci['windows'], ci['chains'])
         if res.scale_source == 'doors' and not p.scale_calibrated:
             msg = tr('scale_doors').format(res.scale) + '   |   ' + msg
+        if self._replace:
+            from ..engine import validate as VAL
+            p.validation = VAL.validate(p)
+            c = VAL.summary(p.validation)
+            unc = sum(1 for d in p.validation if d['code'] == 'uncertain')
+            msg += '   |   ' + tr('val_summary').format(c['critical'], c['major'], c['minor'], unc)
         self.hint.setText(msg)
 
     def fit_dims(self):

@@ -31,7 +31,10 @@ def import_like_app(path, code_has_workflow):
     """Returns gray work image, optional wall view, and 3x3 H mapping INPUT image px -> WORK px."""
     if code_has_workflow:
         from p2c.engine import workflow
-        r = workflow.import_image(path, workflow.ImportOptions())
+        o = workflow.ImportOptions()
+        for k, v in json.loads(os.environ.get('P2C_PP', '{}')).items():      # preprocessing configuration
+            setattr(o, k, v)
+        r = workflow.import_image(path, o)
         return r.gray, r.wall_view, r.H_in_to_work, r
     from p2c.engine import imageio            # baseline: replicate MainWindow.load_image (deskew + clean)
     gray = imageio.imread_gray(path)
@@ -307,6 +310,7 @@ def main():
     ap.add_argument('--seeds', default='1,2')
     ap.add_argument('--uncalibrated', action='store_true', help='also run every case without a known scale')
     ap.add_argument('--real', default='', help='comma list of real cases (needs P2C_REAL_DIR)')
+    ap.add_argument('--pp', default='', help='preprocessing options as JSON, e.g. {"perspective": "off"}')
     ap.add_argument('--worker', nargs=4, metavar=('CASE', 'SEED', 'CAL', 'OUT'))
     a = ap.parse_args()
     if a.worker:
@@ -324,6 +328,8 @@ def main():
     for case, seed, cal in jobs:
         tmp = tempfile.mktemp(suffix='.json')
         env = dict(os.environ, PYTHONPATH=os.path.abspath(a.code) + os.pathsep + os.path.dirname(HERE))
+        if a.pp:
+            env['P2C_PP'] = a.pp
         t = time.time()
         p = subprocess.run([sys.executable, os.path.abspath(__file__), '--code', a.code, '--out', a.out,
                             '--worker', case, str(seed), str(cal), tmp], env=env, capture_output=True, text=True,

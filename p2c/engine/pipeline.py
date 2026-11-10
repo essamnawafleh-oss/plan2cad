@@ -24,10 +24,19 @@ DEFAULTS = dict(
 )
 
 
-def run(project, gray, params=None, progress=None):
-    """Fill *project* from the working image *gray* (uint8)."""
+class Cancelled(Exception):
+    """Raised inside run() when the caller's cancel callback returns True."""
+
+
+def run(project, gray, params=None, progress=None, cancel=None):
+    """Fill *project* from the working image *gray* (uint8).  `cancel()` is polled at every progress step."""
     p = dict(DEFAULTS); p.update(params or {})
-    say = progress or (lambda f, msg='': None)
+    _say = progress or (lambda f, msg='': None)
+
+    def say(f, msg=''):
+        if cancel is not None and cancel():
+            raise Cancelled()
+        _say(f, msg)
     say(0.02, 'binarize')
     # ---- 1. understand the drawing first: directions + dimensions ----
     quick = D.trace_lines(gray, p['threshold'], up=1)
@@ -55,7 +64,13 @@ def run(project, gray, params=None, progress=None):
     s = project.scale
     # ---- 2. trace the remaining drawing ----
     say(0.36, 'trace')
-    polys = D.trace_lines(clean, p['threshold'], up=p.get('trace_up', 3), progress=lambda f: say(0.36 + 0.2*f, 'trace'))
+    _polys = {}
+
+    def rule_trace():                     # only the rule-based wall finder needs this (3x upsampled, slow)
+        if 'v' not in _polys:
+            _polys['v'] = D.trace_lines(clean, p['threshold'], up=p.get('trace_up', 3),
+                                        progress=lambda f: say(0.40 + 0.15 * f, 'trace'))
+        return _polys['v']
     project.trace = [[tuple(map(float, q)) for q in pl] for pl in D.trace_lines(gray, p['threshold'], up=2)]
     say(0.58, 'angles')
     gray_full, gray = gray, clean
@@ -98,7 +113,7 @@ def run(project, gray, params=None, progress=None):
                 extra = [w for w in extra if _wp(w, s).difference(NU).area > 0.6 * _wp(w, s).area]
             solid, lined = nn_walls + extra, []
         else:
-            lined = D.detect_walls_combined(polys, gray, s, project.angles, p)
+            lined = D.detect_walls_combined(rule_trace(), gray, s, project.angles, p)
         if solid:
             from ..geometry import wall_polygon
             from shapely.ops import unary_union as _uu

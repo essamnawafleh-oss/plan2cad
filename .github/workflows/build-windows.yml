@@ -2,7 +2,7 @@ name: Build installer
 
 on:
   push:
-    branches: [main]
+    branches: [main, v2]
   workflow_dispatch:
 
 permissions:
@@ -28,6 +28,16 @@ jobs:
       - name: Smoke test
         run: python -c "import cv2, ezdxf, shapely, PySide6, rapidocr_onnxruntime; assert hasattr(cv2.ximgproc, 'thinning'); print('ok')"
 
+      - name: Model loads
+        run: python -c "from p2c.engine import neural as N; assert N.available(); N._session(); print('model ok')"
+
+      - name: Unit tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          pip install -r requirements-dev.txt
+          python -m pytest -q tests
+
       - name: Build Plan2CAD.exe
         run: pyinstaller --noconfirm Plan2CAD.spec
 
@@ -40,6 +50,7 @@ jobs:
           path: output/Plan2CAD_Setup.exe
 
       - name: Publish release
+        if: github.ref == 'refs/heads/main'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v1.0.${{ github.run_number }}

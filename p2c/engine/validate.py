@@ -47,6 +47,16 @@ def _dist_pt_seg(p, a, b):
     return float(np.linalg.norm(p - (a + t * ab)))
 
 
+def _dist_pts_segs(P, A, B):
+    """Distances from points P (m,2) to segments A->B (n,2): (m, n) array."""
+    P = np.asarray(P, float).reshape(-1, 2)
+    AB = B - A
+    L2 = np.maximum((AB * AB).sum(1), 1e-12)
+    t = np.clip(((P[:, None, :] - A[None]) * AB[None]).sum(2) / L2[None], 0, 1)
+    Q = A[None] + t[..., None] * AB[None]
+    return np.linalg.norm(P[:, None, :] - Q, axis=2)
+
+
 def validate(project):
     s = project.scale
     out = []
@@ -71,20 +81,20 @@ def validate(project):
                               f'سماكة جدار غير منطقية ({w.t:.2f} م)', f'Implausible wall thickness ({w.t:.2f} m)'))
         good.append(i)
     segs = {i: _seg(walls[i]) for i in good}
+    gi = np.array(good, int)
+    A = np.array([segs[i][0] for i in good]).reshape(-1, 2); B = np.array([segs[i][1] for i in good]).reshape(-1, 2)
+    T = np.array([walls[i].t / s for i in good])
+    ENDS = np.vstack([A, B]) if len(good) else np.zeros((0, 2))
+    DE = _dist_pts_segs(ENDS, A, B) if len(good) else np.zeros((0, 0))       # (2n, n)
     # --- connectivity of every wall end
-    for i in good:
+    for k, i in enumerate(good):
         a, b, u, L = segs[i]
         t = walls[i].t / s
         free = []
         for end, p in ((0, a), (1, b)):
-            touch = False
-            for j in good:
-                if j == i:
-                    continue
-                c, d, v, Lj = segs[j]
-                if _dist_pt_seg(p, c, d) <= walls[j].t / s / 2 + t / 2 + 0.03 / s:
-                    touch = True; break
-            if not touch:
+            row = DE[k + end * len(good)].copy()
+            row[k] = np.inf
+            if not np.any(row <= T / 2 + t / 2 + 0.03 / s):
                 free.append((end, p))
         if L * s < 0.15 and len(free) == 2:
             out.append(_issue('minor', 'tiny_wall', 'walls', i, (a + b) / 2, 'قطعة جدار قصيرة جداً ومعزولة',
@@ -115,9 +125,13 @@ def validate(project):
                                   f'{best[1] * s * 100:.0f} cm gap between a wall end and another wall', 'join',
                                   end=end, gap_m=round(best[1] * s, 3), ext_m=round(best[0] * s, 4)))
     # --- duplicates / overlaps (collinear walls)
+    lo = np.minimum(A, B) - T[:, None]; hi = np.maximum(A, B) + T[:, None]
     for ii, i in enumerate(good):
         a, b, u, L = segs[i]
-        for j in good[ii + 1:]:
+        near = np.nonzero((lo[ii + 1:, 0] <= hi[ii, 0]) & (hi[ii + 1:, 0] >= lo[ii, 0]) &
+                          (lo[ii + 1:, 1] <= hi[ii, 1]) & (hi[ii + 1:, 1] >= lo[ii, 1]))[0] + ii + 1
+        for jj in near:
+            j = good[jj]
             c, d, v, Lj = segs[j]
             if abs(abs(u @ v) - 1) > 1 - math.cos(math.radians(2)):
                 continue
@@ -160,8 +174,7 @@ def validate(project):
                 out.append(_issue('major', 'zero_length', kind, k, c, f'{ar} عرضه صفر', f'Zero-width {en.lower()}', 'delete'))
                 continue
             # an opening sits in a wall (window) or between two wall ends (door): test centre and both jambs
-            dmin = min([min(_dist_pt_seg(q, segs[i][0], segs[i][1]) for q in (c, p0, p1)) - walls[i].t / s / 2
-                        for i in good] or [1e9])
+            dmin = float((_dist_pts_segs(np.array([c, p0, p1]), A, B).min(0) - T / 2).min()) if len(good) else 1e9
             if dmin * s > 0.30:
                 out.append(_issue('major', 'off_wall', kind, k, c, f'{ar} ليس على جدار', f'{en} not on a wall'))
             if not lo <= wdt <= hi:
@@ -248,16 +261,24 @@ SAFE = {'invalid_coords', 'zero_length', 'duplicate_wall'}
 
 
 def auto_fix(project, log=None):
-    """Apply only information-preserving fixes, repeatedly (indices shift after each fix)."""
+    """Apply only information-preserving fixes.  Each round validates once and applies every safe fix of
+    that round from the highest index down (so earlier indices stay valid); repeats until none is left."""
     done = []
-    for _ in range(500):
-        iss = [d for d in validate(project) if d['code'] in SAFE and d.get('fix')]
+    for _ in range(20):
+        iss = [d for d in validate(project) if d['code'] in SAFE and d.get('fix') and d.get('kind')]
         if not iss:
             break
-        e = apply_fix(project, iss[0])
-        if e is None:
+        touched = set()
+        iss.sort(key=lambda d: -(d['index'] if d['index'] is not None else -1))
+        for d in iss:
+            key = (d['kind'], d['index']); other = (d['kind'], d.get('other'))
+            if key in touched or other in touched:
+                continue                         # an index this round already changed: next round
+            e = apply_fix(project, d)
+            if e is not None:
+                done.append(e); touched.add(key); touched.add(other)
+        if not touched:
             break
-        done.append(e)
     if log is not None:
         for e in done:
             log.append(dict(e, auto=True))

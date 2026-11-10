@@ -215,7 +215,10 @@ class PlanView(QGraphicsView):
                 if poly is None:
                     continue
                 pp = qpath_from_polygon(poly)
-                add(ObjItem('walls', i, pp, pp, color=None, brush=QBrush(QColor(0, 0, 0, 1)), fill_sel=True), 4)
+                col, br = None, QBrush(QColor(0, 0, 0, 1))
+                if getattr(self, 'show_origin', False):
+                    col, br = self._origin_style(w)
+                add(ObjItem('walls', i, pp, pp, color=col, width=1.6, brush=br, fill_sel=True), 4)
         if self.visible['A-COLUMN']:
             for i, c in enumerate(p.columns):
                 pp = qpath_from_polygon(G.column_polygon(c, s))
@@ -315,7 +318,21 @@ class PlanView(QGraphicsView):
         self.redo_stack.clear()
         self.dirty = True
 
+    ORIGIN_COL = {'': '#2E7CF6', 'manual': '#2E7CF6', 'auto': None, 'fixed': '#F08C00', 'uncertain': '#D6336C'}
+
+    def _origin_style(self, o):
+        org = getattr(o, 'origin', '')
+        c = self.ORIGIN_COL.get(org)
+        if c is None:
+            return None, QBrush(QColor(0, 0, 0, 1))
+        q = QColor(c); q.setAlpha(110)
+        return c, QBrush(q)
+
     def commit(self, keep=None):
+        for k, i in (keep or []):                       # edited by hand -> no longer 'auto'
+            o = self.get(k, i)
+            if o is not None and hasattr(o, 'origin') and o.origin in ('auto', 'fixed', 'uncertain'):
+                o.origin = 'manual'; o.conf = 1.0
         self.rebuild(keep_selection=keep)
         self.modelChanged.emit()
         self._emit_selection()
