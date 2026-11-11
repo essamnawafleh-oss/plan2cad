@@ -42,12 +42,17 @@ jobs:
         run: pyinstaller --noconfirm Plan2CAD.spec
 
       - name: Build Plan2CAD_Setup.exe
+        if: github.ref == 'refs/heads/main'
         run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" installer.iss'
+
+      - name: Build Plan2CAD_Beta_Setup.exe
+        if: github.ref != 'refs/heads/main'
+        run: '& "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DBETA installer.iss'
 
       - uses: actions/upload-artifact@v4
         with:
           name: Plan2CAD_Setup
-          path: output/Plan2CAD_Setup.exe
+          path: output/*.exe
 
       - name: Publish release
         if: github.ref == 'refs/heads/main'
@@ -62,3 +67,19 @@ jobs:
 
             نزّل `Plan2CAD_Setup.exe` تحت، ودبل كليك عليه لتثبيت البرنامج.
             Download `Plan2CAD_Setup.exe` below and double-click it to install.
+
+      - name: Publish beta (pre-release, not "latest")
+        if: github.ref == 'refs/heads/v2'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v2.0.0-beta.${{ github.run_number }}
+          name: Plan2CAD 2.0 beta ${{ github.run_number }}
+          prerelease: true
+          make_latest: false
+          target_commitish: ${{ github.sha }}
+          files: output/Plan2CAD_Beta_Setup.exe
+          body: |
+            **نسخة تجريبية — Plan2CAD 2.0 beta** — Essam Nawafleh — عصام النوافلة
+
+            بتنزل كبرنامج منفصل اسمه "Plan2CAD Beta" جنب النسخة العادية، وما بتلغيها.
+            Installs as a separate program "Plan2CAD Beta" next to the stable version.
